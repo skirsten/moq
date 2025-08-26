@@ -24,9 +24,6 @@ export type AudioProps = {
 	speaking?: SpeakingProps;
 };
 
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet?worker&url";
-
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
 export class Audio {
@@ -94,7 +91,15 @@ export class Audio {
 
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
-			await context.audioWorklet.addModule(RenderWorklet);
+
+			// Hacky workaround to support Webpack and Vite:
+			// https://github.com/webpack/webpack/issues/11543#issuecomment-2045809214
+
+			const { register } = navigator.serviceWorker;
+			// @ts-ignore hack to make webpack believe that it is registering a worker
+			navigator.serviceWorker.register = (url: URL) => context.audioWorklet.addModule(url);
+			await navigator.serviceWorker.register(new URL("./render-worklet", import.meta.url));
+			navigator.serviceWorker.register = register;
 
 			// Create the worklet node
 			const worklet = new AudioWorkletNode(context, "render");

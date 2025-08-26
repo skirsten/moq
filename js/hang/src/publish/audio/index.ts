@@ -1,19 +1,16 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, type Getter, Signal } from "@kixelated/signals";
 import type * as Catalog from "../../catalog";
-import { u8, u53 } from "../../catalog/integers";
+import { u53, u8 } from "../../catalog/integers";
 import * as Container from "../../container";
 import { Captions, type CaptionsProps } from "./captions";
 import type * as Capture from "./capture";
+import { Speaking, type SpeakingProps } from "./speaking";
 
 export * from "./captions";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
-
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import CaptureWorklet from "./capture-worklet?worker&url";
-import { Speaking, type SpeakingProps } from "./speaking";
 
 export type AudioConstraints = Omit<
 	MediaTrackConstraints,
@@ -132,7 +129,15 @@ export class Audio {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await context.audioWorklet.addModule(CaptureWorklet);
+			// Hacky workaround to support Webpack and Vite:
+			// https://github.com/webpack/webpack/issues/11543#issuecomment-2045809214
+
+			const { register } = navigator.serviceWorker;
+			// @ts-ignore hack to make webpack believe that it is registering a worker
+			navigator.serviceWorker.register = (url: URL) => context.audioWorklet.addModule(url);
+			await navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url));
+			navigator.serviceWorker.register = register;
+
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
