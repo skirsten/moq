@@ -4,7 +4,6 @@ import type * as Catalog from "../../catalog";
 import { u8 } from "../../catalog";
 import { BoolProducer } from "../../container/bool";
 import type { Audio } from ".";
-import CaptureWorklet from "./capture-worklet?worker&url";
 import type { Request, Result } from "./speaking-worker";
 
 export type SpeakingProps = {
@@ -85,7 +84,14 @@ export class Speaking {
 
 		// The workload needs to be loaded asynchronously, unfortunately, but it should be instant.
 		effect.spawn(async () => {
-			await ctx.audioWorklet.addModule(CaptureWorklet);
+			// Hacky workaround to support Webpack and Vite:
+			// https://github.com/webpack/webpack/issues/11543#issuecomment-2045809214
+
+			const { register } = navigator.serviceWorker;
+			// @ts-ignore hack to make webpack believe that it is registering a worker
+			navigator.serviceWorker.register = (url: URL) => ctx.audioWorklet.addModule(url);
+			await navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url));
+			navigator.serviceWorker.register = register;
 
 			// Create the worklet.
 			const worklet = new AudioWorkletNode(ctx, "capture", {
