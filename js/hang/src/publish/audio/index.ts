@@ -1,7 +1,7 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, type Getter, Signal } from "@kixelated/signals";
 import type * as Catalog from "../../catalog";
-import { u53, u8 } from "../../catalog/integers";
+import { u8, u53 } from "../../catalog/integers";
 import * as Container from "../../container";
 import { loadAudioWorklet } from "../../util/hacks";
 import { Captions, type CaptionsProps } from "./captions";

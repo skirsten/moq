@@ -1,10 +1,10 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, Signal } from "@kixelated/signals";
-import type { Audio } from ".";
 import type * as Catalog from "../../catalog";
 import { u8 } from "../../catalog";
 import { BoolProducer } from "../../container/bool";
 import { loadAudioWorklet } from "../../util/hacks";
+import type { Audio } from ".";
 import type { Request, Result } from "./speaking-worker";
 
 export type SpeakingProps = {

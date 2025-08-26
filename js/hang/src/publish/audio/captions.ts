@@ -1,9 +1,9 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, Signal } from "@kixelated/signals";
-import type { Audio } from ".";
 import type * as Catalog from "../../catalog";
 import { u8 } from "../../catalog";
 import { loadAudioWorklet } from "../../util/hacks";
+import type { Audio } from ".";
 import type { Request, Result } from "./captions-worker";
 
 export type CaptionsProps = {
