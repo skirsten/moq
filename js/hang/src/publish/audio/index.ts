@@ -3,6 +3,7 @@ import { Effect, type Getter, Signal } from "@kixelated/signals";
 import type * as Catalog from "../../catalog";
 import { u53, u8 } from "../../catalog/integers";
 import * as Container from "../../container";
+import { loadAudioWorklet } from "../../util/hacks";
 import { Captions, type CaptionsProps } from "./captions";
 import type * as Capture from "./capture";
 import { Speaking, type SpeakingProps } from "./speaking";
@@ -129,14 +130,11 @@ export class Audio {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			// Hacky workaround to support Webpack and Vite:
-			// https://github.com/webpack/webpack/issues/11543#issuecomment-2045809214
-
-			const { register } = navigator.serviceWorker;
-			// @ts-ignore hack to make webpack believe that it is registering a worker
-			navigator.serviceWorker.register = (url: URL) => context.audioWorklet.addModule(url);
-			await navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url));
-			navigator.serviceWorker.register = register;
+			await context.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url)),
+				),
+			);
 
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,

@@ -2,13 +2,13 @@ import type * as Moq from "@kixelated/moq";
 import { Effect, type Getter, Signal } from "@kixelated/signals";
 import type * as Catalog from "../../catalog";
 import * as Container from "../../container";
+import { loadAudioWorklet } from "../../util/hacks";
 import * as Hex from "../../util/hex";
+import { Captions, type CaptionsProps } from "./captions";
 import type * as Render from "./render";
+import { Speaking, type SpeakingProps } from "./speaking";
 
 export * from "./emitter";
-
-import { Captions, type CaptionsProps } from "./captions";
-import { Speaking, type SpeakingProps } from "./speaking";
 
 export type AudioProps = {
 	// Enable to download the audio track.
@@ -91,15 +91,11 @@ export class Audio {
 
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
-
-			// Hacky workaround to support Webpack and Vite:
-			// https://github.com/webpack/webpack/issues/11543#issuecomment-2045809214
-
-			const { register } = navigator.serviceWorker;
-			// @ts-ignore hack to make webpack believe that it is registering a worker
-			navigator.serviceWorker.register = (url: URL) => context.audioWorklet.addModule(url);
-			await navigator.serviceWorker.register(new URL("./render-worklet", import.meta.url));
-			navigator.serviceWorker.register = register;
+			await context.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./render-worklet", import.meta.url)),
+				),
+			);
 
 			// Create the worklet node
 			const worklet = new AudioWorkletNode(context, "render");
