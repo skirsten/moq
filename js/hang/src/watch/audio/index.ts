@@ -97,7 +97,10 @@ export class Audio {
 			await context.audioWorklet.addModule(RenderWorklet);
 
 			// Create the worklet node
-			const worklet = new AudioWorkletNode(context, "render");
+			const worklet = new AudioWorkletNode(context, "render", {
+				channelCount,
+				channelCountMode: "explicit",
+			});
 			effect.cleanup(() => worklet.disconnect());
 
 			// Listen for buffer status updates (optional, for monitoring)
