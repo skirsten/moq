@@ -9,13 +9,11 @@ import { PRIORITY } from "../priority";
 import { Captions, type CaptionsProps } from "./captions";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
+import { Speaking, type SpeakingProps } from "./speaking";
+import { loadAudioWorklet } from "../../util/hacks";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
-
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import CaptureWorklet from "./capture-worklet?worker&url";
-import { Speaking, type SpeakingProps } from "./speaking";
 
 // The initial values for our signals.
 export type EncoderProps = {
@@ -105,7 +103,13 @@ export class Encoder {
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
 			const ready = await Promise.race([
-				context.audioWorklet.addModule(CaptureWorklet).then(() => true),
+				context.audioWorklet
+					.addModule(
+						await loadAudioWorklet(() =>
+							navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url))
+						)
+					)
+					.then(() => true),
 				effect.cancel,
 			]);
 			if (!ready) return;
