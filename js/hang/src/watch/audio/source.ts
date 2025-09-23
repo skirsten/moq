@@ -8,6 +8,7 @@ import * as libav from "../../util/libav";
 import { Captions, type CaptionsProps } from "./captions";
 import type * as Render from "./render";
 import { Speaking, type SpeakingProps } from "./speaking";
+import { loadAudioWorklet } from "../../util/hacks";
 
 // We want some extra overhead to avoid starving the render worklet.
 // The default Opus frame duration is 20ms.
@@ -27,9 +28,6 @@ export type SourceProps = {
 	// Enable to download the speaking track. (boolean)
 	speaking?: SpeakingProps;
 };
-
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet?worker&url";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
@@ -65,7 +63,7 @@ export class Source {
 	constructor(
 		broadcast: Getter<Moq.Broadcast | undefined>,
 		catalog: Getter<Catalog.Root | undefined>,
-		props?: SourceProps,
+		props?: SourceProps
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
@@ -117,7 +115,11 @@ export class Source {
 
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
-			await context.audioWorklet.addModule(RenderWorklet);
+			await context.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./render-worklet", import.meta.url))
+				)
+			);
 
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;
@@ -236,7 +238,7 @@ export class Source {
 		// TODO: At some point, use SharedArrayBuffer to avoid dropping samples.
 		worklet.port.postMessage(
 			msg,
-			msg.data.map((data) => data.buffer),
+			msg.data.map((data) => data.buffer)
 		);
 
 		sample.close();

@@ -1,8 +1,8 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, Signal } from "@kixelated/signals";
 import * as Catalog from "../../catalog";
+import { loadAudioWorklet } from "../../util/hacks";
 import { PRIORITY } from "../priority";
-import CaptureWorklet from "./capture-worklet?worker&url";
 import type { Request, Result } from "./speaking-worker";
 import type { Source } from "./types";
 
@@ -72,7 +72,11 @@ export class Speaking {
 
 		// The workload needs to be loaded asynchronously, unfortunately, but it should be instant.
 		effect.spawn(async () => {
-			await ctx.audioWorklet.addModule(CaptureWorklet);
+			await ctx.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url))
+				)
+			);
 
 			// Ensure the context is running before creating the worklet
 			if (ctx.state === "closed") return;
