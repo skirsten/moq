@@ -1,9 +1,9 @@
 import * as Moq from "@kixelated/moq";
 import { Effect, Signal } from "@kixelated/signals";
 import * as Catalog from "../../catalog";
-import CaptureWorklet from "./capture-worklet?worker&url";
 import type { Request, Result } from "./speaking-worker";
 import type { Source } from "./types";
+import { loadAudioWorklet } from "../../util/hacks";
 
 export type SpeakingProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -83,7 +83,11 @@ export class Speaking {
 
 		// The workload needs to be loaded asynchronously, unfortunately, but it should be instant.
 		effect.spawn(async () => {
-			await ctx.audioWorklet.addModule(CaptureWorklet);
+			await ctx.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url))
+				)
+			);
 
 			// Create the worklet.
 			const worklet = new AudioWorkletNode(ctx, "capture", {
