@@ -11,6 +11,7 @@
 	},
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
+		"pack": "cd dist && bun pm pack",
 		"check": "tsc --noEmit && biome check && madge --circular --extensions ts,tsx src",
 		"test": "bun test",
 		"fix": "biome check --fix",
