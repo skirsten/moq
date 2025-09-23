@@ -51,3 +51,6 @@ upgrade:
 build:
 	bun install --frozen-lockfile
 	bun run --filter='*' build
+
+pack:
+	bun run --filter='*' pack
