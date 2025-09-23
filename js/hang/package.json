@@ -25,6 +25,7 @@
 	],
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
+		"pack": "cd dist && bun pm pack",
 		"check": "tsc --noEmit",
 		"test": "vitest",
 		"release": "bun ../scripts/release.ts"
