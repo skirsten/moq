@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use super::{Decode, DecodeError, Encode, Sizer};
+use crate::coding::{Decode, DecodeError, Encode, Sizer};
 
 /// A trait for messages that are automatically size-prefixed during encoding/decoding.
 ///
@@ -32,7 +32,7 @@ impl<T: Message> Decode for T {
 		let mut limited = buf.take(size);
 		let result = Message::decode(&mut limited)?;
 		if limited.remaining() > 0 {
-			return Err(DecodeError::TooManyBytes);
+			return Err(DecodeError::Long);
 		}
 
 		Ok(result)

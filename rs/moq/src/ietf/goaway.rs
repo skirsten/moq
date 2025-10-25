@@ -1,8 +1,8 @@
-//! IETF moq-transport-07 goaway message
+//! IETF moq-transport-14 goaway message
 
 use std::borrow::Cow;
 
-use crate::coding::*;
+use crate::{coding::*, ietf::Message};
 
 /// GoAway message (0x10)
 #[derive(Clone, Debug)]
@@ -11,6 +11,8 @@ pub struct GoAway<'a> {
 }
 
 impl<'a> Message for GoAway<'a> {
+	const ID: u64 = 0x10;
+
 	fn encode<W: bytes::BufMut>(&self, w: &mut W) {
 		self.new_session_uri.encode(w);
 	}

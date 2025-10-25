@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{coding::*, Path};
+use crate::{coding::*, lite::Message, Path};
 
 /// Sent by the publisher to announce the availability of a track.
 /// The payload contains the contents of the wildcard.
@@ -72,11 +72,7 @@ enum AnnounceStatus {
 impl Decode for AnnounceStatus {
 	fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
 		let status = u8::decode(r)?;
-		match status {
-			0 => Ok(Self::Ended),
-			1 => Ok(Self::Active),
-			_ => Err(DecodeError::InvalidValue),
-		}
+		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
 }
 

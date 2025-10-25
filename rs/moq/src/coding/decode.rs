@@ -11,6 +11,9 @@ pub enum DecodeError {
 	#[error("short buffer")]
 	Short,
 
+	#[error("long buffer")]
+	Long,
+
 	#[error("invalid string")]
 	InvalidString(#[from] FromUtf8Error),
 
@@ -23,6 +26,9 @@ pub enum DecodeError {
 	#[error("invalid value")]
 	InvalidValue,
 
+	#[error("too many")]
+	TooMany,
+
 	#[error("bounds exceeded")]
 	BoundsExceeded,
 
@@ -32,24 +38,39 @@ pub enum DecodeError {
 	#[error("expected data")]
 	ExpectedData,
 
-	#[error("too many bytes")]
-	TooManyBytes,
+	#[error("duplicate")]
+	Duplicate,
 
-	// TODO move these to ParamError
-	#[error("duplicate parameter")]
-	DupliateParameter,
+	#[error("missing")]
+	Missing,
 
-	#[error("missing parameter")]
-	MissingParameter,
+	#[error("unsupported")]
+	Unsupported,
+}
 
-	#[error("invalid parameter")]
-	InvalidParameter,
+impl Decode for bool {
+	fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
+		match u8::decode(r)? {
+			0 => Ok(false),
+			1 => Ok(true),
+			_ => Err(DecodeError::InvalidValue),
+		}
+	}
 }
 
 impl Decode for u8 {
 	fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
 		match r.has_remaining() {
 			true => Ok(r.get_u8()),
+			false => Err(DecodeError::Short),
+		}
+	}
+}
+
+impl Decode for u16 {
+	fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
+		match r.remaining() >= 2 {
+			true => Ok(r.get_u16()),
 			false => Err(DecodeError::Short),
 		}
 	}

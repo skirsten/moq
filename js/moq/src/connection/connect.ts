@@ -71,23 +71,27 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// moq-rs currently requires the ROLE extension to be set.
-	const extensions = new Lite.Extensions();
-	extensions.set(0x0n, new Uint8Array([0x03]));
-
-	const msg = new Lite.SessionClient([Lite.CURRENT_VERSION, Ietf.CURRENT_VERSION], extensions);
 	const stream = await Stream.open(quic);
 
-	// We're encoding 0x40 so it's backwards compatible with moq-transport
+	// We're encoding 0x20 so it's backwards compatible with moq-transport-10+
 	await stream.writer.u53(Lite.StreamId.ClientCompat);
+
+	const encoder = new TextEncoder();
+
+	const params = new Ietf.Parameters();
+	params.set(2n, new Uint8Array([63])); // Allow some request_ids without delving into varint encoding.
+	params.set(5n, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
+
+	const msg = new Ietf.ClientSetup([Lite.CURRENT_VERSION, Ietf.CURRENT_VERSION], params);
 	await msg.encode(stream.writer);
 
-	// And we expect 0x41 as the response.
+	// And we expect 0x21 as the response.
 	const serverCompat = await stream.reader.u53();
 	if (serverCompat !== Lite.StreamId.ServerCompat) {
 		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
 	}
 
-	const server = await Lite.SessionServer.decode(stream.reader);
+	const server = await Ietf.ServerSetup.decode(stream.reader);
 	if (server.version === Lite.CURRENT_VERSION) {
 		console.debug(url.toString(), "moq-lite session established");
 		return new Lite.Connection(url, quic, stream);

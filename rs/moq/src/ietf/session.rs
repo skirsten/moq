@@ -1,6 +1,6 @@
 use crate::{
 	coding::{Reader, Stream, Writer},
-	ietf::{self, Control, MessageId},
+	ietf::{self, Control, Message},
 	Error, OriginConsumer, OriginProducer,
 };
 
@@ -9,11 +9,12 @@ use super::{Publisher, Subscriber};
 pub(crate) async fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S>,
+	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
-		match run(session.clone(), setup, publish, subscribe).await {
+		match run(session.clone(), setup, client, publish, subscribe).await {
 			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
@@ -35,11 +36,19 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 async fn run<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S>,
+	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 ) -> Result<(), Error> {
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-	let control = Control::new(tx);
+	let control = Control::new(tx, client);
+
+	// Allow the peer to send up to u32::MAX requests.
+	let max_request_id = ietf::MaxRequestId {
+		request_id: u32::MAX as u64,
+	};
+	control.send(max_request_id)?;
+
 	let publisher = Publisher::new(session.clone(), publish, control.clone());
 	let subscriber = Subscriber::new(session.clone(), subscribe, control);
 
@@ -57,62 +66,97 @@ async fn run_control_read<S: web_transport_trait::Session>(
 	mut subscriber: Subscriber<S>,
 ) -> Result<(), Error> {
 	loop {
-		let id: MessageId = control.decode().await?;
+		let id: u64 = control.decode().await?;
+		let size: u16 = control.decode::<u16>().await?;
+		let mut data = control.read_exact(size as usize).await?;
+
 		match id {
-			MessageId::Subscribe => {
-				let msg: ietf::Subscribe = control.decode().await?;
+			ietf::Subscribe::ID => {
+				let msg = ietf::Subscribe::decode(&mut data)?;
 				publisher.recv_subscribe(msg)?;
 			}
-			MessageId::SubscribeUpdate => return Err(Error::Unsupported),
-			MessageId::SubscribeOk => {
-				let msg: ietf::SubscribeOk = control.decode().await?;
+			ietf::SubscribeUpdate::ID => return Err(Error::Unsupported),
+			ietf::SubscribeOk::ID => {
+				let msg = ietf::SubscribeOk::decode(&mut data)?;
 				subscriber.recv_subscribe_ok(msg)?;
 			}
-			MessageId::SubscribeError => {
-				let msg: ietf::SubscribeError = control.decode().await?;
+			ietf::SubscribeError::ID => {
+				let msg = ietf::SubscribeError::decode(&mut data)?;
 				subscriber.recv_subscribe_error(msg)?;
 			}
-			MessageId::Announce => {
-				let msg: ietf::Announce = control.decode().await?;
-				subscriber.recv_announce(msg)?;
+			ietf::PublishNamespace::ID => {
+				let msg = ietf::PublishNamespace::decode(&mut data)?;
+				subscriber.recv_publish_namespace(msg)?;
 			}
-			MessageId::AnnounceOk => {
-				let msg: ietf::AnnounceOk = control.decode().await?;
-				publisher.recv_announce_ok(msg)?;
+			ietf::PublishNamespaceOk::ID => {
+				let msg = ietf::PublishNamespaceOk::decode(&mut data)?;
+				publisher.recv_publish_namespace_ok(msg)?;
 			}
-			MessageId::AnnounceError => return Err(Error::Unsupported),
-			MessageId::Unannounce => {
-				let msg: ietf::Unannounce = control.decode().await?;
-				subscriber.recv_unannounce(msg)?;
+			ietf::PublishNamespaceError::ID => {
+				let msg = ietf::PublishNamespaceError::decode(&mut data)?;
+				publisher.recv_publish_namespace_error(msg)?;
 			}
-			MessageId::Unsubscribe => {
-				let msg: ietf::Unsubscribe = control.decode().await?;
+			ietf::PublishNamespaceDone::ID => {
+				let msg = ietf::PublishNamespaceDone::decode(&mut data)?;
+				subscriber.recv_publish_namespace_done(msg)?;
+			}
+			ietf::Unsubscribe::ID => {
+				let msg = ietf::Unsubscribe::decode(&mut data)?;
 				publisher.recv_unsubscribe(msg)?;
 			}
-			MessageId::SubscribeDone => {
-				let msg: ietf::SubscribeDone = control.decode().await?;
-				subscriber.recv_subscribe_done(msg)?;
+			ietf::PublishDone::ID => {
+				let msg = ietf::PublishDone::decode(&mut data)?;
+				subscriber.recv_publish_done(msg)?;
 			}
-			MessageId::AnnounceCancel => return Err(Error::Unsupported),
-			MessageId::TrackStatusRequest => return Err(Error::Unsupported),
-			MessageId::TrackStatus => return Err(Error::Unsupported),
-			MessageId::GoAway => return Err(Error::Unsupported),
-			MessageId::SubscribeAnnounces => {
-				let msg: ietf::SubscribeAnnounces = control.decode().await?;
-				publisher.recv_subscribe_announces(msg)?;
+			ietf::PublishNamespaceCancel::ID => {
+				let msg = ietf::PublishNamespaceCancel::decode(&mut data)?;
+				publisher.recv_publish_namespace_cancel(msg)?;
 			}
-			MessageId::SubscribeAnnouncesOk => return Err(Error::Unsupported),
-			MessageId::SubscribeAnnouncesError => return Err(Error::Unsupported),
-			MessageId::UnsubscribeAnnounces => {
-				let msg: ietf::UnsubscribeAnnounces = control.decode().await?;
-				publisher.recv_unsubscribe_announces(msg)?;
+			ietf::TrackStatusRequest::ID => {
+				let msg = ietf::TrackStatusRequest::decode(&mut data)?;
+				publisher.recv_track_status_request(msg)?;
 			}
-			MessageId::MaxSubscribeId => return Err(Error::Unsupported),
-			MessageId::Fetch => return Err(Error::Unsupported),
-			MessageId::FetchCancel => return Err(Error::Unsupported),
-			MessageId::FetchOk => return Err(Error::Unsupported),
-			MessageId::FetchError => return Err(Error::Unsupported),
-			MessageId::ClientSetup | MessageId::ServerSetup => return Err(Error::UnexpectedMessage),
+			ietf::TrackStatus::ID => {
+				let msg = ietf::TrackStatus::decode(&mut data)?;
+				subscriber.recv_track_status(msg)?;
+			}
+			ietf::GoAway::ID => return Err(Error::Unsupported),
+			ietf::SubscribeNamespace::ID => {
+				let msg = ietf::SubscribeNamespace::decode(&mut data)?;
+				publisher.recv_subscribe_namespace(msg)?;
+			}
+			ietf::SubscribeNamespaceOk::ID => {
+				let msg = ietf::SubscribeNamespaceOk::decode(&mut data)?;
+				subscriber.recv_subscribe_namespace_ok(msg)?;
+			}
+			ietf::SubscribeNamespaceError::ID => {
+				let msg = ietf::SubscribeNamespaceError::decode(&mut data)?;
+				subscriber.recv_subscribe_namespace_error(msg)?;
+			}
+			ietf::UnsubscribeNamespace::ID => {
+				let msg = ietf::UnsubscribeNamespace::decode(&mut data)?;
+				publisher.recv_unsubscribe_namespace(msg)?;
+			}
+			ietf::MaxRequestId::ID => {
+				let msg = ietf::MaxRequestId::decode(&mut data)?;
+				tracing::warn!(?msg, "ignoring max request id");
+			}
+			ietf::RequestsBlocked::ID => {
+				let msg = ietf::RequestsBlocked::decode(&mut data)?;
+				tracing::warn!(?msg, "ignoring requests blocked");
+			}
+			ietf::Fetch::ID => return Err(Error::Unsupported),
+			ietf::FetchCancel::ID => return Err(Error::Unsupported),
+			ietf::FetchOk::ID => return Err(Error::Unsupported),
+			ietf::FetchError::ID => return Err(Error::Unsupported),
+			ietf::Publish::ID => return Err(Error::Unsupported),
+			ietf::PublishOk::ID => return Err(Error::Unsupported),
+			ietf::PublishError::ID => return Err(Error::Unsupported),
+			_ => return Err(Error::UnexpectedMessage),
+		}
+
+		if !data.is_empty() {
+			return Err(Error::WrongSize);
 		}
 	}
 }

@@ -4,11 +4,17 @@ import type * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
-import { Announce, type AnnounceCancel, type AnnounceError, type AnnounceOk, Unannounce } from "./announce.ts";
 import type * as Control from "./control.ts";
-import { Frame, Group as GroupMessage, writeStreamType } from "./object.ts";
-import { type Subscribe, SubscribeDone, SubscribeError, SubscribeOk, type Unsubscribe } from "./subscribe.ts";
-import type { SubscribeAnnounces, UnsubscribeAnnounces } from "./subscribe_announces.ts";
+import { Frame, Group as GroupMessage } from "./object.ts";
+import {
+	PublishNamespace,
+	type PublishNamespaceCancel,
+	PublishNamespaceDone,
+	type PublishNamespaceError,
+	type PublishNamespaceOk,
+} from "./publish_namespace.ts";
+import { PublishDone, type Subscribe, SubscribeError, SubscribeOk, type Unsubscribe } from "./subscribe.ts";
+import type { SubscribeNamespace, UnsubscribeNamespace } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 
 /**
@@ -46,13 +52,14 @@ export class Publisher {
 
 	async #runPublish(path: Path.Valid, broadcast: Broadcast) {
 		try {
-			const announce = new Announce(path);
+			const requestId = this.#control.requestId();
+			const announce = new PublishNamespace(requestId, path);
 			await this.#control.write(announce);
 
 			// Wait until the broadcast is closed, then remove it from the lookup.
 			await broadcast.closed;
 
-			const unannounce = new Unannounce(path);
+			const unannounce = new PublishNamespaceDone(path);
 			await this.#control.write(unannounce);
 		} catch (err: unknown) {
 			const e = error(err);
@@ -76,10 +83,9 @@ export class Publisher {
 
 		if (!broadcast) {
 			const errorMsg = new SubscribeError(
-				msg.subscribeId,
+				msg.requestId,
 				404, // Not found
 				"Broadcast not found",
-				msg.trackAlias,
 			);
 			await this.#control.write(errorMsg);
 			return;
@@ -88,35 +94,33 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
 
 		// Send SUBSCRIBE_OK response on control stream
-		const okMsg = new SubscribeOk(msg.subscribeId);
+		const okMsg = new SubscribeOk(msg.requestId);
 		await this.#control.write(okMsg);
 
 		// Start sending track data using ObjectStream (Subgroup delivery mode only)
-		void this.#runTrack(msg.subscribeId, msg.trackAlias, track);
+		void this.#runTrack(msg.requestId, track);
 	}
 
 	/**
 	 * Runs a track and sends its data using ObjectStream messages.
-	 * @param subscribeId - The subscription ID
-	 * @param trackAlias - The track alias
-	 * @param broadcast - The broadcast name
+	 * @param requestId - The subscription request ID (also used as track alias)
 	 * @param track - The track to run
 	 *
 	 * @internal
 	 */
-	async #runTrack(subscribeId: bigint, trackAlias: bigint, track: Track) {
+	async #runTrack(requestId: number, track: Track) {
 		try {
 			for (;;) {
 				const group = await track.nextGroup();
 				if (!group) break;
-				void this.#runGroup(subscribeId, trackAlias, group);
+				void this.#runGroup(requestId, group);
 			}
 
-			const msg = new SubscribeDone(subscribeId, 200, "OK");
+			const msg = new PublishDone(requestId, 200, "OK");
 			await this.#control.write(msg);
 		} catch (err: unknown) {
 			const e = error(err);
-			const msg = new SubscribeDone(subscribeId, 500, e.message);
+			const msg = new PublishDone(requestId, 500, e.message);
 			await this.#control.write(msg);
 		} finally {
 			track.close();
@@ -125,44 +129,35 @@ export class Publisher {
 
 	/**
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
-	 * @param subscribeId - The subscription ID
-	 * @param trackAlias - The track alias
+	 * @param requestId - The subscription request ID (also used as track alias)
 	 * @param group - The group to run
 	 *
 	 * @internal
 	 */
-	async #runGroup(subscribeId: bigint, trackAlias: bigint, group: Group) {
+	async #runGroup(requestId: number, group: Group) {
 		try {
 			// Create a new unidirectional stream for this group
 			const stream = await Writer.open(this.#quic);
 
-			// Write stream type for STREAM_HEADER_SUBGROUP
-			await writeStreamType(stream);
-
 			// Write STREAM_HEADER_SUBGROUP
-			const header = new GroupMessage(
-				subscribeId,
-				trackAlias,
-				group.sequence,
-				0, // publisherPriority
-			);
+			const header = new GroupMessage(requestId, group.sequence, {
+				hasExtensions: false,
+				hasSubgroup: false,
+				hasSubgroupObject: false,
+				// Automatically end the group on stream FIN
+				hasEnd: true,
+			});
 			await header.encode(stream);
 
 			try {
-				let objectId = 0;
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
 					// Write each frame as an object
-					const obj = new Frame(objectId, frame);
-					await obj.encode(stream);
-					objectId++;
+					const obj = new Frame(frame);
+					await obj.encode(stream, header.flags);
 				}
-
-				// Send end of group marker via an undefined payload
-				const endOfGroup = new Frame(objectId);
-				await endOfGroup.encode(stream);
 
 				stream.close();
 			} catch (err: unknown) {
@@ -192,30 +187,30 @@ export class Publisher {
 	}
 
 	/**
-	 * Handles an ANNOUNCE_OK control message received on the control stream.
-	 * @param msg - The announce ok message
+	 * Handles a PUBLISH_NAMESPACE_OK control message received on the control stream.
+	 * @param msg - The publish namespace ok message
 	 */
-	async handleAnnounceOk(_msg: AnnounceOk) {
+	async handlePublishNamespaceOk(_msg: PublishNamespaceOk) {
 		// TODO
 	}
 
 	/**
-	 * Handles an ANNOUNCE_ERROR control message received on the control stream.
-	 * @param msg - The announce error message
+	 * Handles a PUBLISH_NAMESPACE_ERROR control message received on the control stream.
+	 * @param msg - The publish namespace error message
 	 */
-	async handleAnnounceError(_msg: AnnounceError) {
+	async handlePublishNamespaceError(_msg: PublishNamespaceError) {
 		// TODO
 	}
 
 	/**
-	 * Handles an ANNOUNCE_CANCEL control message received on the control stream.
-	 * @param msg - The ANNOUNCE_CANCEL message
+	 * Handles a PUBLISH_NAMESPACE_CANCEL control message received on the control stream.
+	 * @param msg - The PUBLISH_NAMESPACE_CANCEL message
 	 */
-	async handleAnnounceCancel(_msg: AnnounceCancel) {
+	async handlePublishNamespaceCancel(_msg: PublishNamespaceCancel) {
 		// TODO
 	}
 
-	async handleSubscribeAnnounces(_msg: SubscribeAnnounces) {}
+	async handleSubscribeNamespace(_msg: SubscribeNamespace) {}
 
-	async handleUnsubscribeAnnounces(_msg: UnsubscribeAnnounces) {}
+	async handleUnsubscribeNamespace(_msg: UnsubscribeNamespace) {}
 }
