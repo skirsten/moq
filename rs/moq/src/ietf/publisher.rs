@@ -6,7 +6,7 @@ use web_transport_trait::SendStream;
 
 use crate::{
 	coding::Writer,
-	ietf::{self, Control},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location},
 	model::GroupConsumer,
 	Error, Origin, OriginConsumer, Track, TrackConsumer,
 };
@@ -16,6 +16,8 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
 	control: Control,
+
+	// Drop in order to cancel the subscribe.
 	subscribes: Lock<HashMap<u64, oneshot::Sender<()>>>,
 }
 
@@ -55,6 +57,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub fn recv_subscribe(&mut self, msg: ietf::Subscribe<'_>) -> Result<(), Error> {
+		match msg.filter_type {
+			FilterType::AbsoluteStart | FilterType::AbsoluteRange => {
+				return self.control.send(ietf::SubscribeError {
+					request_id: msg.request_id,
+					error_code: 500,
+					reason_phrase: "Absolute subscribe not supported".into(),
+				});
+			}
+			// We actually send LargestGroup, which the peer can't enforce anyway.
+			FilterType::NextGroup | FilterType::LargestObject => {}
+		};
+
 		let request_id = msg.request_id;
 
 		let track = msg.track_name.clone();
@@ -85,7 +99,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut subscribes = self.subscribes.lock();
 		subscribes.insert(request_id, tx);
 
-		self.control.send(ietf::SubscribeOk { request_id })?;
+		self.control.send(ietf::SubscribeOk {
+			request_id,
+			track_alias: request_id,
+		})?;
 
 		let session = self.session.clone();
 		let control = self.control.clone();
@@ -115,6 +132,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		});
 
 		Ok(())
+	}
+
+	pub fn recv_subscribe_update(&mut self, msg: ietf::SubscribeUpdate) -> Result<(), Error> {
+		self.control.send(ietf::SubscribeError {
+			request_id: msg.request_id,
+			error_code: 500,
+			reason_phrase: "subscribe update not supported".into(),
+		})
 	}
 
 	async fn run_track(
@@ -169,15 +194,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			let priority = stream_priority(track.info.priority, sequence);
-			let msg = ietf::Group {
-				request_id,
+			let msg = ietf::GroupHeader {
+				track_alias: request_id,
 				group_id: sequence,
-
-				// All of these flags are dumb
-				has_extensions: false,      // not using extensions
-				has_subgroup: false,        // not using subgroups
-				has_subgroup_object: false, // not using the first object to indicate the subgroup
-				has_end: true,              // no explicit end marker required
+				flags: Default::default(),
 			};
 
 			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
@@ -205,7 +225,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	async fn run_group(session: S, msg: ietf::Group, priority: i32, mut group: GroupConsumer) -> Result<(), Error> {
+	async fn run_group(
+		session: S,
+		msg: ietf::GroupHeader,
+		priority: i32,
+		mut group: GroupConsumer,
+	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
 		let mut stream = session
 			.open_uni()
@@ -234,7 +259,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			stream.encode(&0u8).await?;
 
 			// not using extensions.
-			if msg.has_extensions {
+			if msg.flags.has_extensions {
 				stream.encode(&0u8).await?;
 			}
 
@@ -303,8 +328,89 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	pub fn recv_track_status_request(&mut self, _msg: ietf::TrackStatusRequest<'_>) -> Result<(), Error> {
+	pub fn recv_track_status(&mut self, _msg: ietf::TrackStatus<'_>) -> Result<(), Error> {
 		Err(Error::Unsupported)
+	}
+
+	pub fn recv_fetch(&mut self, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+		let subscribe_id = match msg.fetch_type {
+			FetchType::Standalone { .. } => {
+				return self.control.send(ietf::FetchError {
+					request_id: msg.request_id,
+					error_code: 500,
+					reason_phrase: "not supported".into(),
+				});
+			}
+			FetchType::RelativeJoining {
+				subscriber_request_id,
+				group_offset,
+			} => {
+				if group_offset != 0 {
+					return self.control.send(ietf::FetchError {
+						request_id: msg.request_id,
+						error_code: 500,
+						reason_phrase: "not supported".into(),
+					});
+				}
+
+				subscriber_request_id
+			}
+			FetchType::AbsoluteJoining { .. } => {
+				return self.control.send(ietf::FetchError {
+					request_id: msg.request_id,
+					error_code: 500,
+					reason_phrase: "not supported".into(),
+				});
+			}
+		};
+
+		let subscribes = self.subscribes.lock();
+		if !subscribes.contains_key(&subscribe_id) {
+			return self.control.send(ietf::FetchError {
+				request_id: msg.request_id,
+				error_code: 404,
+				reason_phrase: "Subscribe not found".into(),
+			});
+		}
+
+		self.control.send(ietf::FetchOk {
+			request_id: msg.request_id,
+			group_order: GroupOrder::Descending,
+			end_of_track: false,
+			// TODO get the proper group_id
+			end_location: Location { group: 0, object: 0 },
+		})?;
+
+		let session = self.session.clone();
+		let request_id = msg.request_id;
+
+		web_async::spawn(async move {
+			if let Err(err) = Self::run_fetch(session, request_id).await {
+				tracing::warn!(?err, "error running fetch");
+			}
+		});
+
+		Ok(())
+	}
+
+	// We literally just create a stream and FIN it.
+	async fn run_fetch(session: S, request_id: u64) -> Result<(), Error> {
+		let stream = session
+			.open_uni()
+			.await
+			.map_err(|err| Error::Transport(Arc::new(err)))?;
+
+		let mut writer = Writer::new(stream);
+		writer.encode(&FetchHeader::TYPE).await?;
+		writer.encode(&FetchHeader { request_id }).await?;
+		writer.finish().await?;
+
+		Ok(())
+	}
+
+	pub fn recv_fetch_cancel(&mut self, msg: ietf::FetchCancel) -> Result<(), Error> {
+		tracing::warn!(?msg, "fetch cancel");
+		Ok(())
 	}
 }
 

@@ -5,21 +5,31 @@ use std::{
 
 use crate::{
 	coding::Reader,
-	ietf::{self, Control},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder},
 	model::BroadcastProducer,
 	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, TrackProducer,
 };
 
 use web_async::Lock;
 
+#[derive(Default)]
+struct SubscriberState {
+	subscribes: HashMap<u64, SubscriberTrack>,
+	aliases: HashMap<u64, u64>,
+	broadcasts: HashMap<PathOwned, BroadcastProducer>,
+}
+
+struct SubscriberTrack {
+	producer: TrackProducer,
+	alias: Option<u64>,
+}
+
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
-	subscribes: Lock<HashMap<u64, TrackProducer>>,
-
-	producers: Lock<HashMap<PathOwned, BroadcastProducer>>,
+	state: Lock<SubscriberState>,
 	control: Control,
 }
 
@@ -28,8 +38,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Self {
 			session,
 			origin,
-			subscribes: Default::default(),
-			producers: Default::default(),
+			state: Default::default(),
 			control,
 		}
 	}
@@ -55,8 +64,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let broadcast = Broadcast::produce();
 
+		let mut state = self.state.lock();
+
 		// Make sure the peer doesn't double announce.
-		match self.producers.lock().entry(path.to_owned()) {
+		match state.broadcasts.entry(path.to_owned()) {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
 			Entry::Vacant(entry) => entry.insert(broadcast.producer.clone()),
 		};
@@ -80,30 +91,49 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let path = msg.track_namespace.to_owned();
 		tracing::debug!(broadcast = %origin.absolute(&path), "unannounced");
 
+		let mut state = self.state.lock();
+
 		// Close the producer.
-		let mut producer = self.producers.lock().remove(&path).ok_or(Error::NotFound)?;
+		let mut producer = state.broadcasts.remove(&path).ok_or(Error::NotFound)?;
 
 		producer.close();
 
 		Ok(())
 	}
 
-	pub fn recv_subscribe_ok(&mut self, _msg: ietf::SubscribeOk) -> Result<(), Error> {
-		// Don't care.
+	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
+		// Save the track alias if it's not the same as the request id.
+		if msg.request_id != msg.track_alias {
+			let mut state = self.state.lock();
+			if let Some(subscribe) = state.subscribes.get_mut(&msg.request_id) {
+				subscribe.alias = Some(msg.track_alias);
+				state.aliases.insert(msg.track_alias, msg.request_id);
+			}
+		}
+
 		Ok(())
 	}
 
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
-		if let Some(track) = self.subscribes.lock().remove(&msg.request_id) {
-			track.abort(Error::Cancel);
+		let mut state = self.state.lock();
+
+		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+			track.producer.abort(Error::Cancel);
+			if let Some(alias) = track.alias {
+				state.aliases.remove(&alias);
+			}
 		}
 
 		Ok(())
 	}
 
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
-		if let Some(track) = self.subscribes.lock().remove(&msg.request_id) {
-			track.close();
+		let mut state = self.state.lock();
+		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+			track.producer.close();
+			if let Some(alias) = track.alias {
+				state.aliases.remove(&alias);
+			}
 		}
 
 		Ok(())
@@ -129,6 +159,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_uni_stream(mut self, mut stream: Reader<S::RecvStream>) -> Result<(), Error> {
+		let kind: u64 = stream.decode_peek().await?;
+
+		match kind {
+			FetchHeader::TYPE => return Err(Error::Unsupported),
+			GroupFlags::START..=GroupFlags::END => {}
+			_ => return Err(Error::UnexpectedStream),
+		}
+
 		if let Err(err) = self.recv_group(&mut stream).await {
 			stream.abort(&err);
 		}
@@ -153,25 +191,38 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let request_id = self.control.request_id();
 			let mut this = self.clone();
 
+			let mut state = self.state.lock();
+			state.subscribes.insert(
+				request_id,
+				SubscriberTrack {
+					producer: track.clone(),
+					alias: None,
+				},
+			);
+
 			let path = path.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(request_id, path, track).await;
-				this.subscribes.lock().remove(&request_id);
+				if let Err(err) = this.run_subscribe(request_id, path, track).await {
+					tracing::debug!(%err, id = %request_id, "error running subscribe");
+				}
+				this.state.lock().subscribes.remove(&request_id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, request_id: u64, broadcast: Path<'_>, track: TrackProducer) {
-		self.subscribes.lock().insert(request_id, track.clone());
+	async fn run_subscribe(&mut self, request_id: u64, broadcast: Path<'_>, track: TrackProducer) -> Result<(), Error> {
+		self.control.send(ietf::Subscribe {
+			request_id,
+			track_namespace: broadcast.to_owned(),
+			track_name: (&track.info.name).into(),
+			subscriber_priority: track.info.priority,
+			group_order: GroupOrder::Descending,
+			// we want largest group
+			filter_type: FilterType::LargestObject,
+		})?;
 
-		self.control
-			.send(ietf::Subscribe {
-				request_id,
-				track_namespace: broadcast.to_owned(),
-				track_name: (&track.info.name).into(),
-				subscriber_priority: track.info.priority,
-			})
-			.ok();
+		// TODO we should send a joining fetch, but it's annoying to implement.
+		// We hope instead that publisher start subscriptions at group boundaries.
 
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
 
@@ -179,19 +230,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
 
 		track.abort(Error::Cancel);
+
+		Ok(())
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream>) -> Result<(), Error> {
-		let group: ietf::Group = stream.decode().await?;
+		let group: ietf::GroupHeader = stream.decode().await?;
 
 		let producer = {
-			let mut subs = self.subscribes.lock();
-			let track = subs.get_mut(&group.request_id).ok_or(Error::Cancel)?;
+			let mut state = self.state.lock();
+			let request_id = *state.aliases.get(&group.track_alias).unwrap_or(&group.track_alias);
+			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.create_group(group).ok_or(Error::Old)?
+			track.producer.create_group(group).ok_or(Error::Old)?
 		};
 
 		let res = tokio::select! {
@@ -219,7 +273,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_group(
 		&mut self,
-		group: ietf::Group,
+		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream>,
 		mut producer: GroupProducer,
 	) -> Result<(), Error> {
@@ -228,7 +282,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Err(Error::Unsupported);
 			}
 
-			if group.has_extensions {
+			if group.flags.has_extensions {
 				let size: usize = stream.decode().await?;
 				stream.skip(size).await?;
 			}
@@ -241,7 +295,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Empty frame
 					let frame = producer.create_frame(Frame { size: 0 });
 					frame.close();
-				} else if status == 3 && !group.has_end {
+				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
 				} else {
@@ -285,10 +339,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	pub fn recv_track_status(&mut self, _msg: ietf::TrackStatus<'_>) -> Result<(), Error> {
-		Err(Error::Unsupported)
-	}
-
 	pub fn recv_subscribe_namespace_ok(&mut self, _msg: ietf::SubscribeNamespaceOk) -> Result<(), Error> {
 		// Don't care.
 		Ok(())
@@ -297,5 +347,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_namespace_error(&mut self, msg: ietf::SubscribeNamespaceError<'_>) -> Result<(), Error> {
 		tracing::warn!(?msg, "subscribe namespace error");
 		Ok(())
+	}
+
+	pub fn recv_fetch_ok(&mut self, _msg: ietf::FetchOk) -> Result<(), Error> {
+		Err(Error::Unsupported)
+	}
+
+	pub fn recv_fetch_error(&mut self, _msg: ietf::FetchError<'_>) -> Result<(), Error> {
+		Err(Error::Unsupported)
+	}
+
+	pub fn recv_publish(&mut self, msg: ietf::Publish<'_>) -> Result<(), Error> {
+		self.control.send(ietf::PublishError {
+			request_id: msg.request_id,
+			error_code: 300,
+			reason_phrase: "publish not supported bro".into(),
+		})
 	}
 }
