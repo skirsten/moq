@@ -3,6 +3,7 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import type * as Time from "../../time";
+import { loadAudioWorklet } from "../../util/hacks";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type * as Render from "./render";
@@ -19,9 +20,6 @@ export type SourceProps = {
 	// Jitter buffer size in milliseconds (default: 100ms)
 	latency?: Time.Milli | Signal<Time.Milli>;
 };
-
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
@@ -104,7 +102,11 @@ export class Source {
 
 		effect.spawn(async () => {
 			// Register the AudioWorklet processor
-			await context.audioWorklet.addModule(RenderWorklet);
+			await context.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./render-worklet", import.meta.url)),
+				),
+			);
 
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;

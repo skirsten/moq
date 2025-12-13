@@ -4,6 +4,7 @@ import type * as Catalog from "../../catalog";
 import { u53 } from "../../catalog/integers";
 import * as Frame from "../../frame";
 import * as Time from "../../time";
+import { loadAudioWorklet } from "../../util/hacks";
 import * as libav from "../../util/libav";
 import { PRIORITY } from "../priority";
 import type * as Capture from "./capture";
@@ -11,9 +12,6 @@ import type { Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
-
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import CaptureWorklet from "./capture-worklet.ts?worker&url";
 
 // The initial values for our signals.
 export type EncoderProps = {
@@ -96,7 +94,11 @@ export class Encoder {
 
 		// Async because we need to wait for the worklet to be registered.
 		effect.spawn(async () => {
-			await context.audioWorklet.addModule(CaptureWorklet);
+			await context.audioWorklet.addModule(
+				await loadAudioWorklet(() =>
+					navigator.serviceWorker.register(new URL("./capture-worklet", import.meta.url))
+				)
+			);
 			if (context.state === "closed") return;
 
 			const worklet = new AudioWorkletNode(context, "capture", {
