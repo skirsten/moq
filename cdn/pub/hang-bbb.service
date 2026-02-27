@@ -8,7 +8,7 @@ Requires=hang-bbb-prepare.service
 Type=simple
 User=root
 WorkingDirectory=/var/lib/moq
-Environment="RUST_LOG=debug"
+Environment="RUST_LOG=info"
 
 # Stream fragmented video in a loop and pipe to hang publish
 ExecStart=/bin/bash -c '\
