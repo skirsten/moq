@@ -24,6 +24,13 @@ variable "ssh_keys" {
   type        = list(string)
 }
 
+variable "webhook" {
+  description = "Webhook URL for all alerts (Slack, Discord, etc.)"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 # Relay node definitions
 # regions: https://api.linode.com/v4/regions
 # instance types: https://api.linode.com/v4/linode/types

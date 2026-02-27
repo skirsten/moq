@@ -18,3 +18,6 @@ email = "admin@moq.dev"
 ssh_keys = [
   "ssh-ed25519 AAAA... your-key-comment",
 ]
+
+# Optional: Webhook URL for all alerts (Slack, Discord, etc.)
+# webhook = "https://discord.com/api/webhooks/..."
