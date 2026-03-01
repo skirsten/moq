@@ -66,7 +66,12 @@ export class Decoder implements Backend {
 
 	#runPending(effect: Effect): void {
 		const values = effect.getAll([this.enabled, this.source.broadcast, this.source.track, this.source.config]);
-		if (!values) return;
+		if (!values) {
+			// Close the active track when disabled (e.g. paused or not visible).
+			// The pending cleanup won't do this because it was already promoted to #active.
+			this.#active.set(undefined);
+			return;
+		}
 		const [_, source, track, config] = values;
 
 		const broadcast = effect.get(source.active);
@@ -105,7 +110,11 @@ export class Decoder implements Backend {
 
 	#runActive(effect: Effect): void {
 		const active = effect.get(this.#active);
-		if (!active) return;
+		if (!active) {
+			// Clear stale data when disabled (e.g. paused or not visible).
+			this.#buffered.set([]);
+			return;
+		}
 
 		effect.cleanup(() => active.close());
 
