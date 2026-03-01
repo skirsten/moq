@@ -36,10 +36,11 @@ deploy node:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az relay/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' relay/ common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
@@ -47,12 +48,12 @@ deploy node:
 		systemctl enable moq-cert.service && \
 		systemctl enable certbot-renew.timer && \
 		systemctl enable vacuum.timer && \
-		systemctl enable ram-alert.timer && \
+		systemctl enable memory-alert.service && \
 		systemctl enable moq-relay.service && \
 		systemctl start certbot-renew.timer && \
 		systemctl start vacuum.timer && \
-		systemctl start ram-alert.timer && \
 		systemctl start moq-cert.service && \
+		systemctl restart memory-alert.service && \
 		systemctl restart moq-relay.service"
 
 # Check status of a node
@@ -88,10 +89,11 @@ deploy-pub:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az pub/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' pub/ common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
@@ -99,8 +101,10 @@ deploy-pub:
 		systemctl enable hang-bbb-prepare.service && \
 		systemctl enable hang-bbb.service && \
 		systemctl enable vacuum.timer && \
+		systemctl enable memory-alert.service && \
 		systemctl start hang-bbb-prepare.service && \
 		systemctl start vacuum.timer && \
+		systemctl restart memory-alert.service && \
 		systemctl restart hang-bbb.service"
 
 # Check status of publisher
@@ -121,6 +125,19 @@ logs-pub:
 	#!/usr/bin/env bash
 	HOST=$(just host pub)
 	ssh root@$HOST "journalctl -u hang-bbb -f"
+
+# Profile moq-relay on a node using perf (built via nix)
+perf node *args:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	HOST=$(just host {{node}})
+	echo "Building perf on $HOST..."
+	ssh root@$HOST "cd /var/lib/moq && nix build .#perf -o perf"
+	echo "Recording on $HOST... (Ctrl+C to stop)"
+	ssh -t root@$HOST "/var/lib/moq/perf/bin/perf record -g -p \$(pidof moq-relay) {{args}}"
+	echo "Copying perf.data..."
+	scp root@$HOST:~/perf.data .
+	echo "Run 'perf report -i perf.data' to analyze."
 
 # Run health checks against all relay nodes
 health:

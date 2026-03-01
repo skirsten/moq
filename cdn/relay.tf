@@ -3,14 +3,7 @@ resource "local_file" "moq_relay_service" {
   content = templatefile("${path.module}/relay/moq-relay.service.tftpl", {
     domain = var.domain
   })
-  filename = "${path.module}/relay/moq-relay.service"
-}
-
-resource "local_file" "ram_alert_service" {
-  content = templatefile("${path.module}/relay/ram-alert.service.tftpl", {
-    webhook = var.webhook
-  })
-  filename = "${path.module}/relay/ram-alert.service"
+  filename = "${path.module}/gen/moq-relay.service"
 }
 
 resource "local_file" "moq_cert_service" {
@@ -18,7 +11,7 @@ resource "local_file" "moq_cert_service" {
     domain = var.domain
     email  = var.email
   })
-  filename = "${path.module}/relay/moq-cert.service"
+  filename = "${path.module}/gen/moq-cert.service"
 }
 
 # Create Linode instances
