@@ -375,8 +375,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.producer.create_group(group)?
 		};
 
-		// NOTE: We don't check `producer.unused()` because it's being written to a cache.
-		match self.run_group(group, stream, producer.clone()).await {
+		let res = tokio::select! {
+			err = producer.closed() => Err(err),
+			res = self.run_group(group, stream, producer.clone()) => res,
+		};
+
+		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
 				let _ = producer.close(Error::Cancel);
