@@ -7,10 +7,13 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, Message, MessageParameters, Parameters, RequestId, Version},
+	ietf::{FilterType, GroupOrder, MessageParameters, Parameters, RequestId},
 };
 
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+use super::Version;
 
 /// TrackStatus message (0x0d)
 /// v14: own format (TrackStatusRequest-like with subscribe fields)
@@ -43,6 +46,9 @@ impl Message for TrackStatus<'_> {
 				let params = MessageParameters::default();
 				params.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		Ok(())
 	}
@@ -63,6 +69,9 @@ impl Message for TrackStatus<'_> {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
+			Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		}
 
 		Ok(Self {
@@ -82,15 +91,15 @@ pub enum TrackStatusCode {
 	Ended = 0x03,
 }
 
-impl<V> Encode<V> for TrackStatusCode {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for TrackStatusCode {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		u64::from(*self).encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for TrackStatusCode {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for TrackStatusCode {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
@@ -137,6 +146,34 @@ mod tests {
 
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: TrackStatus = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	#[test]
+	fn test_track_status_v17_rejected() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
+	fn test_track_status_v16_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft16).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");

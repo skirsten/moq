@@ -2,10 +2,11 @@
 
 use std::borrow::Cow;
 
-use crate::{
-	coding::*,
-	ietf::{Message, Version},
-};
+use crate::coding::*;
+
+use super::Message;
+
+use super::Version;
 
 /// GoAway message (0x10)
 #[derive(Clone, Debug)]

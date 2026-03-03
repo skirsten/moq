@@ -7,6 +7,7 @@ use crate::coding::*;
 use super::Version;
 
 const MAX_PARAMS: u64 = 64;
+const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;
 
 // ---- Setup Parameters (used in CLIENT_SETUP/SERVER_SETUP) ----
 
@@ -57,7 +58,7 @@ impl Decode<Version> for Parameters {
 					prev_type = abs;
 					abs
 				}
-				_ => u64::decode(r, version)?,
+				Version::Draft14 | Version::Draft15 | Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -117,7 +118,7 @@ impl Encode<Version> for Parameters {
 					}
 				}
 			}
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					u64::from(*kind).encode(w, version)?;
 					value.encode(w, version)?;
@@ -184,7 +185,7 @@ impl Decode<Version> for MessageParameters {
 					prev_type = abs;
 					abs
 				}
-				_ => u64::decode(r, version)?,
+				Version::Draft14 | Version::Draft15 | Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -240,7 +241,7 @@ impl Encode<Version> for MessageParameters {
 					}
 				}
 			}
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					kind.encode(w, version)?;
 					value.encode(w, version)?;
@@ -339,15 +340,19 @@ impl MessageParameters {
 	pub fn largest_object(&self) -> Option<super::Location> {
 		let data = self.bytes.get(&Self::LARGEST_OBJECT)?;
 		let mut buf = bytes::Bytes::from(data.clone());
-		let group = u64::decode(&mut buf, ()).ok()?;
-		let object = u64::decode(&mut buf, ()).ok()?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		let v = PARAM_SUBVALUE_VERSION;
+		let group = u64::decode(&mut buf, v).ok()?;
+		let object = u64::decode(&mut buf, v).ok()?;
 		Some(super::Location { group, object })
 	}
 
 	pub fn set_largest_object(&mut self, loc: &super::Location) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		loc.group.encode(&mut buf, ())?;
-		loc.object.encode(&mut buf, ())?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		let v = PARAM_SUBVALUE_VERSION;
+		loc.group.encode(&mut buf, v)?;
+		loc.object.encode(&mut buf, v)?;
 		self.bytes.insert(Self::LARGEST_OBJECT, buf);
 		Ok(())
 	}
@@ -356,12 +361,14 @@ impl MessageParameters {
 	pub fn subscription_filter(&self) -> Option<super::FilterType> {
 		let data = self.bytes.get(&Self::SUBSCRIPTION_FILTER)?;
 		let mut buf = bytes::Bytes::from(data.clone());
-		super::FilterType::decode(&mut buf, ()).ok()
+		// Sub-values within parameters always use QUIC varint encoding.
+		super::FilterType::decode(&mut buf, PARAM_SUBVALUE_VERSION).ok()
 	}
 
 	pub fn set_subscription_filter(&mut self, ft: super::FilterType) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		ft.encode(&mut buf, ())?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		ft.encode(&mut buf, PARAM_SUBVALUE_VERSION)?;
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
 		Ok(())
 	}
@@ -441,6 +448,30 @@ mod tests {
 
 		assert_eq!(decoded.subscriber_priority(), Some(128));
 		assert_eq!(decoded.group_order(), Some(2));
+	}
+
+	#[test]
+	fn test_message_parameters_v17_round_trip() {
+		use crate::ietf::{FilterType, Location};
+
+		let mut params = MessageParameters::default();
+		params.set_subscriber_priority(200);
+		params.set_group_order(2);
+		params.set_forward(true);
+		params.set_largest_object(&Location { group: 5, object: 3 }).unwrap();
+		params.set_subscription_filter(FilterType::LargestObject).unwrap();
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft17).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = MessageParameters::decode(&mut bytes, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.subscriber_priority(), Some(200));
+		assert_eq!(decoded.group_order(), Some(2));
+		assert_eq!(decoded.forward(), Some(true));
+		assert_eq!(decoded.largest_object(), Some(Location { group: 5, object: 3 }));
+		assert_eq!(decoded.subscription_filter(), Some(FilterType::LargestObject));
 	}
 
 	#[test]

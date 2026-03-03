@@ -5,10 +5,13 @@ use std::borrow::Cow;
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Message, Parameters, RequestId, Version},
+	ietf::{Parameters, RequestId},
 };
 
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+use super::Version;
 
 /// SubscribeNamespace message (0x11)
 /// In v16, this moves from the control stream to its own bidirectional stream.
@@ -38,7 +41,7 @@ impl Message for SubscribeNamespace<'_> {
 		let namespace = decode_namespace(r, version)?;
 		let subscribe_options = match version {
 			Version::Draft16 => u64::decode(r, version)?,
-			_ => 0x01,
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => 0x01,
 		};
 
 		// Ignore parameters, who cares.

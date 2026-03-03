@@ -9,7 +9,7 @@ use super::BoundsExceeded;
 #[non_exhaustive]
 pub enum EncodeError {
 	#[error("bounds exceeded")]
-	BoundsExceeded(#[from] BoundsExceeded),
+	BoundsExceeded,
 	#[error("too large")]
 	TooLarge,
 	#[error("short buffer")]
@@ -20,6 +20,12 @@ pub enum EncodeError {
 	TooMany,
 	#[error("unsupported version")]
 	Version,
+}
+
+impl From<BoundsExceeded> for EncodeError {
+	fn from(_: BoundsExceeded) -> Self {
+		Self::BoundsExceeded
+	}
 }
 
 /// Check that the writer has enough remaining capacity.
@@ -69,13 +75,19 @@ impl<V> Encode<V> for u16 {
 	}
 }
 
-impl<V> Encode<V> for String {
+impl<V: Copy> Encode<V> for String
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.as_str().encode(w, version)
 	}
 }
 
-impl<V> Encode<V> for &str {
+impl<V: Copy> Encode<V> for &str
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
@@ -95,17 +107,23 @@ impl<V> Encode<V> for i8 {
 	}
 }
 
-impl<T: Encode<V>, V: Clone> Encode<V> for &[T] {
+impl<V: Copy, T: Encode<V>> Encode<V> for &[T]
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.len().encode(w, version.clone())?;
+		self.len().encode(w, version)?;
 		for item in self.iter() {
-			item.encode(w, version.clone())?;
+			item.encode(w, version)?;
 		}
 		Ok(())
 	}
 }
 
-impl<V> Encode<V> for Vec<u8> {
+impl<V: Copy> Encode<V> for Vec<u8>
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
@@ -114,7 +132,10 @@ impl<V> Encode<V> for Vec<u8> {
 	}
 }
 
-impl<V> Encode<V> for bytes::Bytes {
+impl<V: Copy> Encode<V> for bytes::Bytes
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
@@ -129,7 +150,10 @@ impl<T: Encode<V>, V> Encode<V> for Arc<T> {
 	}
 }
 
-impl<V> Encode<V> for Cow<'_, str> {
+impl<V: Copy> Encode<V> for Cow<'_, str>
+where
+	usize: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
@@ -138,7 +162,10 @@ impl<V> Encode<V> for Cow<'_, str> {
 	}
 }
 
-impl<V> Encode<V> for Option<u64> {
+impl<V: Copy> Encode<V> for Option<u64>
+where
+	u64: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		match self {
 			Some(value) => value.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version),
@@ -147,7 +174,10 @@ impl<V> Encode<V> for Option<u64> {
 	}
 }
 
-impl<V> Encode<V> for std::time::Duration {
+impl<V: Copy> Encode<V> for std::time::Duration
+where
+	super::VarInt: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		let ms = super::VarInt::try_from(self.as_millis())?;
 		ms.encode(w, version)

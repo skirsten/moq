@@ -110,10 +110,14 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
+		FilterType, GroupOrder, Location, MessageParameters, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
+
+use super::Message;
+
+use super::Version;
 
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]
@@ -194,6 +198,9 @@ impl Message for Publish<'_> {
 				params.set_forward(self.forward);
 				params.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -251,6 +258,7 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -291,6 +299,9 @@ impl Message for PublishOk {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
+			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
 			}
 		}
 
@@ -351,6 +362,7 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }

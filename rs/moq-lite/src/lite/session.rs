@@ -1,12 +1,8 @@
-use crate::{
-	Error, OriginConsumer, OriginProducer,
-	coding::Stream,
-	lite::{SessionInfo, Version},
-};
+use crate::{Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
 
-use super::{Publisher, Subscriber};
+use super::{Publisher, Subscriber, Version};
 
-pub(crate) fn start<S: web_transport_trait::Session>(
+pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
 	// NOTE: No longer used in draft-03.

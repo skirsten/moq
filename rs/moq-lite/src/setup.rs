@@ -1,13 +1,32 @@
 use bytes::Bytes;
 
 use crate::{
+	Version,
 	coding::{self, Decode, DecodeError, Encode, EncodeError, Sizer},
 	ietf, lite,
-	version::Version,
 };
 
 const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupVersion {
+	Draft14,
+	Draft15Plus,
+	LiteLegacy,
+	Unsupported,
+}
+
+impl SetupVersion {
+	fn from_version(v: Version) -> Self {
+		match v {
+			Version::Ietf(ietf::Version::Draft14) => Self::Draft14,
+			Version::Ietf(ietf::Version::Draft15) | Version::Ietf(ietf::Version::Draft16) => Self::Draft15Plus,
+			Version::Lite(lite::Version::Lite01) | Version::Lite(lite::Version::Lite02) => Self::LiteLegacy,
+			Version::Lite(lite::Version::Lite03) | Version::Ietf(ietf::Version::Draft17) => Self::Unsupported,
+		}
+	}
+}
 
 /// A version-agnostic setup message sent by the client.
 #[derive(Debug, Clone)]
@@ -21,14 +40,12 @@ pub struct Client {
 
 impl Client {
 	fn encode_inner<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), EncodeError> {
-		match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+		match SetupVersion::from_version(v) {
+			SetupVersion::Draft15Plus => {
 				// Draft15+: no versions list, parameters only.
 			}
-			Version::Ietf(ietf::Version::Draft14)
-			| Version::Lite(lite::Version::Draft02)
-			| Version::Lite(lite::Version::Draft01) => self.versions.encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.versions.encode(w, v)?,
+			SetupVersion::Unsupported => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -46,12 +63,10 @@ impl Decode<Version> for Client {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		let size = match v {
-			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
-				u16::decode(r, v)? as usize
-			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
-			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
+		let size = match SetupVersion::from_version(v) {
+			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
+			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
+			SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -60,15 +75,13 @@ impl Decode<Version> for Client {
 
 		let mut msg = r.copy_to_bytes(size);
 
-		let versions = match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+		let versions = match SetupVersion::from_version(v) {
+			SetupVersion::Draft15Plus => {
 				// Draft15+: no versions list, parameters only.
 				coding::Versions::from([v.into()])
 			}
-			Version::Ietf(ietf::Version::Draft14)
-			| Version::Lite(lite::Version::Draft02)
-			| Version::Lite(lite::Version::Draft01) => coding::Versions::decode(&mut msg, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Versions::decode(&mut msg, v)?,
+			SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {
@@ -87,12 +100,12 @@ impl Encode<Version> for Client {
 		self.encode_inner(&mut sizer, v)?;
 		let size = sizer.size;
 
-		match v {
-			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
+		match SetupVersion::from_version(v) {
+			SetupVersion::Draft14 | SetupVersion::Draft15Plus => {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
+			SetupVersion::LiteLegacy => (size as u64).encode(w, v)?,
+			SetupVersion::Unsupported => return Err(EncodeError::Version),
 		}
 		self.encode_inner(w, v)
 	}
@@ -110,14 +123,12 @@ pub struct Server {
 
 impl Server {
 	fn encode_inner<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), EncodeError> {
-		match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+		match SetupVersion::from_version(v) {
+			SetupVersion::Draft15Plus => {
 				// Draft15+: No version field, parameters only.
 			}
-			Version::Ietf(ietf::Version::Draft14)
-			| Version::Lite(lite::Version::Draft02)
-			| Version::Lite(lite::Version::Draft01) => self.version.encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => self.version.encode(w, v)?,
+			SetupVersion::Unsupported => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -135,12 +146,12 @@ impl Encode<Version> for Server {
 		self.encode_inner(&mut sizer, v)?;
 		let size = sizer.size;
 
-		match v {
-			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
+		match SetupVersion::from_version(v) {
+			SetupVersion::Draft14 | SetupVersion::Draft15Plus => {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
+			SetupVersion::LiteLegacy => (size as u64).encode(w, v)?,
+			SetupVersion::Unsupported => return Err(EncodeError::Version),
 		}
 
 		self.encode_inner(w, v)
@@ -154,12 +165,10 @@ impl Decode<Version> for Server {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		let size = match v {
-			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
-				u16::decode(r, v)? as usize
-			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
-			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
+		let size = match SetupVersion::from_version(v) {
+			SetupVersion::Draft14 | SetupVersion::Draft15Plus => u16::decode(r, v)? as usize,
+			SetupVersion::LiteLegacy => u64::decode(r, v)? as usize,
+			SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -167,12 +176,10 @@ impl Decode<Version> for Server {
 		}
 
 		let mut msg = r.copy_to_bytes(size);
-		let version = match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => v.into(),
-			Version::Ietf(ietf::Version::Draft14)
-			| Version::Lite(lite::Version::Draft02)
-			| Version::Lite(lite::Version::Draft01) => coding::Version::decode(&mut msg, v)?,
-			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
+		let version = match SetupVersion::from_version(v) {
+			SetupVersion::Draft15Plus => v.into(),
+			SetupVersion::Draft14 | SetupVersion::LiteLegacy => coding::Version::decode(&mut msg, v)?,
+			SetupVersion::Unsupported => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {

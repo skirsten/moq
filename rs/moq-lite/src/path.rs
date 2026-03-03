@@ -289,13 +289,19 @@ impl Display for Path<'_> {
 	}
 }
 
-impl<V> Decode<V> for Path<'_> {
+impl<V: Copy> Decode<V> for Path<'_>
+where
+	String: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		Ok(String::decode(r, version)?.into())
 	}
 }
 
-impl<V> Encode<V> for Path<'_> {
+impl<V: Copy> Encode<V> for Path<'_>
+where
+	for<'a> &'a str: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.as_str().encode(w, version)?;
 		Ok(())

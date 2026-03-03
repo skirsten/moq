@@ -7,9 +7,11 @@ use crate::{
 	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
 	PathOwned, TrackProducer,
 	coding::{Reader, Stream},
-	lite::{self, Version},
+	lite,
 	model::BroadcastProducer,
 };
+
+use super::Version;
 
 use web_async::Lock;
 
@@ -89,14 +91,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut producers = HashMap::new();
 
 		match self.version {
-			Version::Draft01 | Version::Draft02 => {
+			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for path in msg.suffixes {
 					self.start_announce(path, &mut producers)?;
 				}
 			}
-			Version::Draft03 => {
-				// Draft03: no AnnounceInit, initial state comes via Announce messages.
+			Version::Lite03 => {
+				// Lite03: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 

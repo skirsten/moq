@@ -5,10 +5,13 @@ use std::borrow::Cow;
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Message, Parameters, RequestId, Version},
+	ietf::{Parameters, RequestId},
 };
 
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+use super::Version;
 
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.
@@ -92,6 +95,7 @@ impl Message for PublishNamespaceError<'_> {
 		})
 	}
 }
+
 /// PublishNamespaceDone message (0x09)
 /// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
@@ -113,6 +117,7 @@ impl Message for PublishNamespaceDone<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
+			Version::Draft17 => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -133,6 +138,7 @@ impl Message for PublishNamespaceDone<'_> {
 					request_id,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -160,6 +166,9 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		self.error_code.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
@@ -175,6 +184,9 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				let request_id = RequestId::decode(r, version)?;
 				(Path::default(), request_id)
+			}
+			Version::Draft17 => {
+				return Err(DecodeError::Version);
 			}
 		};
 		let error_code = u64::decode(r, version)?;
@@ -290,6 +302,30 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(7));
 		assert_eq!(decoded.error_code, 1);
 		assert_eq!(decoded.reason_phrase, "Shutdown");
+	}
+
+	#[test]
+	fn test_publish_namespace_done_v17_rejected() {
+		let msg = PublishNamespaceDone {
+			track_namespace: Path::default(),
+			request_id: RequestId(42),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
+	fn test_publish_namespace_cancel_v17_rejected() {
+		let msg = PublishNamespaceCancel {
+			track_namespace: Path::default(),
+			request_id: RequestId(7),
+			error_code: 1,
+			reason_phrase: "Shutdown".into(),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
 	}
 
 	#[test]

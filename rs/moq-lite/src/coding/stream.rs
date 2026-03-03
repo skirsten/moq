@@ -35,7 +35,7 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 	}
 
 	/// Cast the stream to a different version, used during version negotiation.
-	pub fn with_version<O: Clone>(self, version: O) -> Stream<S, O> {
+	pub fn with_version<V2: Clone>(self, version: V2) -> Stream<S, V2> {
 		Stream {
 			writer: self.writer.with_version(version.clone()),
 			reader: self.reader.with_version(version),

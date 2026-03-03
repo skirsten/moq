@@ -167,9 +167,9 @@ impl fmt::Display for VarInt {
 	}
 }
 
-impl<V> Decode<V> for VarInt {
-	/// Decode a varint from the given reader.
-	fn decode<R: bytes::Buf>(r: &mut R, _: V) -> Result<Self, DecodeError> {
+impl VarInt {
+	/// Decode a QUIC-style varint (2-bit length tag in top bits).
+	fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
 		if !r.has_remaining() {
 			return Err(DecodeError::Short);
 		}
@@ -208,11 +208,9 @@ impl<V> Decode<V> for VarInt {
 
 		Ok(Self(x))
 	}
-}
 
-impl<V> Encode<V> for VarInt {
-	/// Encode a varint to the given writer.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: V) -> Result<(), EncodeError> {
+	/// Encode a QUIC-style varint (2-bit length tag in top bits).
+	fn encode_quic<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
 		let remaining = w.remaining_mut();
 		if self.0 < (1u64 << 6) {
 			if remaining < 1 {
@@ -229,54 +227,336 @@ impl<V> Encode<V> for VarInt {
 				return Err(EncodeError::Short);
 			}
 			w.put_u32((0b10 << 30) | self.0 as u32);
-		} else {
+		} else if self.0 < (1u64 << 62) {
 			if remaining < 8 {
 				return Err(EncodeError::Short);
 			}
 			w.put_u64((0b11 << 62) | self.0);
+		} else {
+			return Err(BoundsExceeded.into());
 		}
+		Ok(())
+	}
+
+	/// Decode a leading-1-bits varint (draft-17 Section 1.4.1).
+	///
+	/// The number of leading 1-bits determines the byte length:
+	/// - `0xxxxxxx` → 1 byte, 7 usable bits
+	/// - `10xxxxxx` → 2 bytes, 14 usable bits
+	/// - `110xxxxx` → 3 bytes, 21 usable bits
+	/// - `1110xxxx` → 4 bytes, 28 usable bits
+	/// - `11110xxx` → 5 bytes, 35 usable bits
+	/// - `111110xx` → 6 bytes, 42 usable bits
+	/// - `11111110` → 8 bytes, 56 usable bits (skips 7)
+	/// - `11111111` → 9 bytes, 64 usable bits
+	fn decode_leading_ones<R: bytes::Buf>(r: &mut R) -> Result<Self, DecodeError> {
+		if !r.has_remaining() {
+			return Err(DecodeError::Short);
+		}
+
+		let b = r.get_u8();
+		let ones = b.leading_ones() as usize;
+
+		match ones {
+			0 => {
+				// 0xxxxxxx — 7 bits
+				Ok(Self(u64::from(b)))
+			}
+			1 => {
+				// 10xxxxxx + 1 byte — 14 bits
+				if !r.has_remaining() {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x3F);
+				let lo = u64::from(r.get_u8());
+				Ok(Self((hi << 8) | lo))
+			}
+			2 => {
+				// 110xxxxx + 2 bytes — 21 bits
+				if r.remaining() < 2 {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x1F);
+				let mut buf = [0u8; 2];
+				r.copy_to_slice(&mut buf);
+				Ok(Self((hi << 16) | u64::from(u16::from_be_bytes(buf))))
+			}
+			3 => {
+				// 1110xxxx + 3 bytes — 28 bits
+				if r.remaining() < 3 {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x0F);
+				let mut buf = [0u8; 3];
+				r.copy_to_slice(&mut buf);
+				Ok(Self(
+					(hi << 24) | u64::from(buf[0]) << 16 | u64::from(buf[1]) << 8 | u64::from(buf[2]),
+				))
+			}
+			4 => {
+				// 11110xxx + 4 bytes — 35 bits
+				if r.remaining() < 4 {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x07);
+				let mut buf = [0u8; 4];
+				r.copy_to_slice(&mut buf);
+				Ok(Self((hi << 32) | u64::from(u32::from_be_bytes(buf))))
+			}
+			5 => {
+				// 111110xx + 5 bytes — 42 bits
+				if r.remaining() < 5 {
+					return Err(DecodeError::Short);
+				}
+				let hi = u64::from(b & 0x03);
+				let mut buf = [0u8; 5];
+				r.copy_to_slice(&mut buf);
+				let lo = u64::from(buf[0]) << 32
+					| u64::from(buf[1]) << 24
+					| u64::from(buf[2]) << 16
+					| u64::from(buf[3]) << 8
+					| u64::from(buf[4]);
+				Ok(Self((hi << 40) | lo))
+			}
+			6 => {
+				// 1111110x — INVALID per draft-17
+				Err(DecodeError::InvalidValue)?
+			}
+			7 => {
+				// 11111110 + 7 bytes — 56 bits
+				if r.remaining() < 7 {
+					return Err(DecodeError::Short);
+				}
+				let mut buf = [0u8; 8];
+				buf[0] = 0;
+				r.copy_to_slice(&mut buf[1..]);
+				Ok(Self(u64::from_be_bytes(buf)))
+			}
+			8 => {
+				// 11111111 + 8 bytes — 64 bits
+				if r.remaining() < 8 {
+					return Err(DecodeError::Short);
+				}
+				let mut buf = [0u8; 8];
+				r.copy_to_slice(&mut buf);
+				Ok(Self(u64::from_be_bytes(buf)))
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	/// Encode a leading-1-bits varint (draft-17 Section 1.4.1).
+	fn encode_leading_ones<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
+		let x = self.0;
+		let remaining = w.remaining_mut();
+
+		if x < (1 << 7) {
+			// 0xxxxxxx — 1 byte
+			if remaining < 1 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(x as u8);
+		} else if x < (1 << 14) {
+			// 10xxxxxx — 2 bytes
+			if remaining < 2 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0x80 | (x >> 8) as u8);
+			w.put_u8(x as u8);
+		} else if x < (1 << 21) {
+			// 110xxxxx — 3 bytes
+			if remaining < 3 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xC0 | (x >> 16) as u8);
+			w.put_u16(x as u16);
+		} else if x < (1 << 28) {
+			// 1110xxxx — 4 bytes
+			if remaining < 4 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xE0 | (x >> 24) as u8);
+			w.put_u8((x >> 16) as u8);
+			w.put_u16(x as u16);
+		} else if x < (1 << 35) {
+			// 11110xxx — 5 bytes
+			if remaining < 5 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xF0 | (x >> 32) as u8);
+			w.put_u32(x as u32);
+		} else if x < (1 << 42) {
+			// 111110xx — 6 bytes
+			if remaining < 6 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xF8 | (x >> 40) as u8);
+			w.put_u8((x >> 32) as u8);
+			w.put_u32(x as u32);
+		} else if x < (1 << 56) {
+			// 11111110 — 8 bytes (skips 7)
+			if remaining < 8 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xFE);
+			// Write 7 bytes: high byte then low 6 bytes
+			w.put_u8((x >> 48) as u8);
+			w.put_u16((x >> 32) as u16);
+			w.put_u32(x as u32);
+		} else {
+			// 11111111 — 9 bytes
+			if remaining < 9 {
+				return Err(EncodeError::Short);
+			}
+			w.put_u8(0xFF);
+			w.put_u64(x);
+		}
+
 		Ok(())
 	}
 }
 
-impl<V> Encode<V> for u64 {
-	/// Encode a varint to the given writer.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		let v = VarInt::try_from(*self)?;
-		v.encode(w, version)
+use crate::{Version, ietf, lite};
+
+// All lite versions use QUIC-style varint encoding.
+impl Encode<lite::Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: lite::Version) -> Result<(), EncodeError> {
+		self.encode_quic(w)
 	}
 }
 
-impl<V> Decode<V> for u64 {
+impl Decode<lite::Version> for VarInt {
+	fn decode<R: bytes::Buf>(r: &mut R, _: lite::Version) -> Result<Self, DecodeError> {
+		Self::decode_quic(r)
+	}
+}
+
+// IETF versions use QUIC-style except Draft17 which uses leading-ones.
+impl Encode<ietf::Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: ietf::Version) -> Result<(), EncodeError> {
+		match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => self.encode_quic(w),
+			ietf::Version::Draft17 => self.encode_leading_ones(w),
+		}
+	}
+}
+
+impl Decode<ietf::Version> for VarInt {
+	fn decode<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
+		match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::decode_quic(r),
+			ietf::Version::Draft17 => Self::decode_leading_ones(r),
+		}
+	}
+}
+
+// The top-level Version delegates to the sub-version impls.
+impl Encode<Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match version {
+			Version::Lite(v) => self.encode(w, v),
+			Version::Ietf(v) => self.encode(w, v),
+		}
+	}
+}
+
+impl Decode<Version> for VarInt {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Lite(v) => Self::decode(r, v),
+			Version::Ietf(v) => Self::decode(r, v),
+		}
+	}
+}
+
+// Blanket impls for integer types that delegate to VarInt.
+impl<V: Copy> Encode<V> for u64
+where
+	VarInt: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		VarInt::try_from(*self)?.encode(w, version)
+	}
+}
+
+impl<V: Copy> Decode<V> for u64
+where
+	VarInt: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		VarInt::decode(r, version).map(|v| v.into_inner())
 	}
 }
 
-impl<V> Encode<V> for usize {
-	/// Encode a varint to the given writer.
+impl<V: Copy> Encode<V> for usize
+where
+	VarInt: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		let v = VarInt::try_from(*self)?;
-		v.encode(w, version)
+		VarInt::try_from(*self)?.encode(w, version)
 	}
 }
 
-impl<V> Decode<V> for usize {
+impl<V: Copy> Decode<V> for usize
+where
+	VarInt: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		VarInt::decode(r, version).map(|v| v.into_inner() as usize)
 	}
 }
 
-impl<V> Encode<V> for u32 {
+impl<V: Copy> Encode<V> for u32
+where
+	VarInt: Encode<V>,
+{
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		VarInt::from(*self).encode(w, version)
 	}
 }
 
-impl<V> Decode<V> for u32 {
+impl<V: Copy> Decode<V> for u32
+where
+	VarInt: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let v = VarInt::decode(r, version)?;
 		let v = v.try_into().map_err(|_| DecodeError::BoundsExceeded)?;
 		Ok(v)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::VarInt;
+	use bytes::Bytes;
+
+	#[test]
+	fn leading_ones_boundaries_round_trip() {
+		let cases = [
+			((1u64 << 7) - 1, 1usize),
+			(1u64 << 7, 2usize),
+			((1u64 << 14) - 1, 2usize),
+			(1u64 << 14, 3usize),
+			((1u64 << 56) - 1, 8usize),
+			(1u64 << 56, 9usize),
+		];
+
+		for (value, expected_len) in cases {
+			let varint = VarInt::from_u64(value).expect("value should be representable as VarInt");
+			let mut encoded = Vec::new();
+			varint
+				.encode_leading_ones(&mut encoded)
+				.expect("leading-ones encode should succeed");
+			assert_eq!(
+				encoded.len(),
+				expected_len,
+				"unexpected encoded length for value {value}"
+			);
+
+			let mut bytes = Bytes::from(encoded);
+			let decoded = VarInt::decode_leading_ones(&mut bytes).expect("leading-ones decode should succeed");
+			assert_eq!(decoded.into_inner(), value, "round-trip mismatch for value {value}");
+		}
 	}
 }

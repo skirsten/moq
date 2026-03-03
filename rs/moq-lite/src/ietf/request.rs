@@ -2,13 +2,21 @@ use std::borrow::Cow;
 
 use crate::{
 	coding::{Decode, DecodeError, Encode, EncodeError},
-	ietf::{Message, MessageParameters, Version},
+	ietf::MessageParameters,
 };
+
+use super::Message;
+
+use super::Version;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
 
 impl RequestId {
+	/// Returns the previous request ID and advances by 2.
+	///
+	/// IDs increment by 2 so peers keep parity separation:
+	/// clients use even IDs and servers use odd IDs.
 	pub fn increment(&mut self) -> RequestId {
 		let prev = self.0;
 		self.0 += 2;
@@ -22,15 +30,15 @@ impl std::fmt::Display for RequestId {
 	}
 }
 
-impl<V> Encode<V> for RequestId {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for RequestId {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.0.encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for RequestId {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for RequestId {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = u64::decode(r, version)?;
 		Ok(Self(request_id))
 	}
@@ -117,7 +125,7 @@ impl Message for RequestError<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
-		if version == Version::Draft16 {
+		if version == Version::Draft16 || version == Version::Draft17 {
 			self.retry_interval.encode(w, version)?;
 		}
 		self.reason_phrase.encode(w, version)?;
@@ -128,8 +136,8 @@ impl Message for RequestError<'_> {
 		let request_id = RequestId::decode(r, version)?;
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
-			Version::Draft16 => u64::decode(r, version)?,
-			_ => 0,
+			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
+			Version::Draft14 | Version::Draft15 => 0,
 		};
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {

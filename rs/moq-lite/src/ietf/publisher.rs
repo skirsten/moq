@@ -7,12 +7,11 @@ use web_transport_trait::SendStream;
 use crate::{
 	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::Writer,
-	ietf::{
-		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, Message, MessageParameters, RequestId,
-		Version,
-	},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId},
 	model::GroupConsumer,
 };
+
+use super::{Message, Version};
 
 #[derive(Clone)]
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -181,6 +180,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -454,6 +454,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -471,6 +472,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -499,7 +501,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Reads the request, sends REQUEST_OK, then streams NAMESPACE/NAMESPACE_DONE messages.
 	pub async fn recv_subscribe_namespace_stream(
 		&mut self,
-		mut stream: crate::coding::Stream<S, Version>,
+		mut stream: crate::coding::Stream<S, super::Version>,
 	) -> Result<(), Error> {
 		let msg: ietf::SubscribeNamespace = stream.reader.decode().await?;
 		let prefix = msg.namespace.to_owned();

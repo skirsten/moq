@@ -5,8 +5,10 @@ use tokio::sync::Notify;
 use crate::{
 	Error,
 	coding::{Encode, Writer},
-	ietf::{Message, RequestId, Version},
+	ietf::RequestId,
 };
+
+use super::{Message, Version};
 
 struct ControlState {
 	request_id_next: RequestId,

@@ -1,11 +1,10 @@
-use crate::{
-	coding::*,
-	lite::{Message, Version},
-};
+use crate::coding::*;
+
+use super::{Message, Version};
 
 /// Sent to probe the available bitrate.
 ///
-/// Draft03 only.
+/// Lite03 only.
 #[derive(Clone, Debug)]
 pub struct Probe {
 	pub bitrate: u64,
@@ -14,10 +13,10 @@ pub struct Probe {
 impl Message for Probe {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {
+			Version::Lite03 => {}
+			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
-			Version::Draft03 => {}
 		}
 
 		let bitrate = u64::decode(r, version)?;
@@ -27,10 +26,10 @@ impl Message for Probe {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {
+			Version::Lite03 => {}
+			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
-			Version::Draft03 => {}
 		}
 
 		self.bitrate.encode(w, version)?;

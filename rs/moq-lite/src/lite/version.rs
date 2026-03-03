@@ -1,46 +1,40 @@
-use crate::coding;
+use std::fmt;
 
-/// The ALPN string for the Lite protocol.
-///
-/// NOTE: The version is still negotiated via the setup message.
-/// In the future we'll use ALPN instead.
-pub const ALPN: &str = "moql";
-
-/// The ALPN string for Draft03, which uses ALPN-based version negotiation.
-pub const ALPN_03: &str = "moq-lite-03";
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[repr(u64)]
+/// A lite protocol version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Version {
-	Draft01 = 0xff0dad01,
-	Draft02 = 0xff0dad02,
-	Draft03 = 0xff0dad03,
+	Lite01,
+	Lite02,
+	Lite03,
 }
 
-impl TryFrom<coding::Version> for Version {
-	type Error = ();
-
-	fn try_from(value: coding::Version) -> Result<Self, Self::Error> {
-		if value == Self::Draft01.coding() {
-			Ok(Self::Draft01)
-		} else if value == Self::Draft02.coding() {
-			Ok(Self::Draft02)
-		} else if value == Self::Draft03.coding() {
-			Ok(Self::Draft03)
-		} else {
-			Err(())
+impl fmt::Display for Version {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Self::Lite01 => write!(f, "moq-lite-01"),
+			Self::Lite02 => write!(f, "moq-lite-02"),
+			Self::Lite03 => write!(f, "moq-lite-03"),
 		}
 	}
 }
 
-impl From<Version> for coding::Version {
-	fn from(value: Version) -> Self {
-		value.coding()
+impl From<Version> for crate::Version {
+	fn from(v: Version) -> Self {
+		match v {
+			Version::Lite01 => crate::Version::Lite(Version::Lite01),
+			Version::Lite02 => crate::Version::Lite(Version::Lite02),
+			Version::Lite03 => crate::Version::Lite(Version::Lite03),
+		}
 	}
 }
 
-impl Version {
-	pub const fn coding(self) -> coding::Version {
-		coding::Version(self as u64)
+impl TryFrom<crate::Version> for Version {
+	type Error = ();
+
+	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
+		match v {
+			crate::Version::Lite(v) => Ok(v),
+			crate::Version::Ietf(_) => Err(()),
+		}
 	}
 }

@@ -84,7 +84,10 @@ impl<V> Decode<V> for u16 {
 	}
 }
 
-impl<V> Decode<V> for String {
+impl<V: Copy> Decode<V> for String
+where
+	usize: Decode<V>,
+{
 	/// Decode a string with a varint length prefix.
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let v = Vec::<u8>::decode(r, version)?;
@@ -94,7 +97,10 @@ impl<V> Decode<V> for String {
 	}
 }
 
-impl<V> Decode<V> for Vec<u8> {
+impl<V: Copy> Decode<V> for Vec<u8>
+where
+	usize: Decode<V>,
+{
 	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
 		let size = usize::decode(buf, version)?;
 
@@ -120,7 +126,10 @@ impl<V> Decode<V> for i8 {
 	}
 }
 
-impl<V> Decode<V> for bytes::Bytes {
+impl<V: Copy> Decode<V> for bytes::Bytes
+where
+	usize: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let len = usize::decode(r, version)?;
 		if r.remaining() < len {
@@ -132,14 +141,20 @@ impl<V> Decode<V> for bytes::Bytes {
 }
 
 // TODO Support borrowed strings.
-impl<V> Decode<V> for Cow<'_, str> {
+impl<V: Copy> Decode<V> for Cow<'_, str>
+where
+	usize: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let s = String::decode(r, version)?;
 		Ok(Cow::Owned(s))
 	}
 }
 
-impl<V> Decode<V> for Option<u64> {
+impl<V: Copy> Decode<V> for Option<u64>
+where
+	u64: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		match u64::decode(r, version)? {
 			0 => Ok(None),
@@ -148,7 +163,10 @@ impl<V> Decode<V> for Option<u64> {
 	}
 }
 
-impl<V> Decode<V> for std::time::Duration {
+impl<V: Copy> Decode<V> for std::time::Duration
+where
+	u64: Decode<V>,
+{
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let value = u64::decode(r, version)?;
 		Ok(Self::from_millis(value))

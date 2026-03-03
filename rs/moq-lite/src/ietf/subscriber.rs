@@ -4,9 +4,11 @@ use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
 	coding::Reader,
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId, Version},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId},
 	model::BroadcastProducer,
 };
+
+use super::Version;
 
 use web_async::Lock;
 
@@ -87,6 +89,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -104,6 +107,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -183,6 +187,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					Ok(())
 				}
 			}
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -498,6 +503,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						retry_interval: 0,
 					})?;
 				}
+				Version::Draft17 => {
+					return Err(Error::Version);
+				}
 			}
 		} else {
 			match self.version {
@@ -515,6 +523,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						request_id: msg.request_id,
 						parameters: MessageParameters::default(),
 					})?;
+				}
+				Version::Draft17 => {
+					return Err(Error::Version);
 				}
 			}
 		}

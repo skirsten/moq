@@ -165,7 +165,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	/// Cast the reader to a different version, used during version negotiation.
-	pub fn with_version<O>(self, version: O) -> Reader<S, O> {
+	pub fn with_version<V2>(self, version: V2) -> Reader<S, V2> {
 		Reader {
 			stream: self.stream,
 			buffer: self.buffer,

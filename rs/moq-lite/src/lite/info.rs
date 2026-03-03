@@ -1,7 +1,6 @@
-use crate::{
-	coding::*,
-	lite::{Message, Version},
-};
+use crate::coding::*;
+
+use super::{Message, Version};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -11,8 +10,10 @@ pub struct SessionInfo {
 impl Message for SessionInfo {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => return Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 => {
+				return Err(DecodeError::Version);
+			}
 		}
 
 		let bitrate = match u64::decode(r, version)? {
@@ -25,8 +26,10 @@ impl Message for SessionInfo {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		self.bitrate.unwrap_or(0).encode(w, version)?;

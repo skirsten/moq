@@ -4,10 +4,14 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
+		GroupOrder, Location, MessageParameters, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
+
+use super::Message;
+
+use super::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
@@ -28,8 +32,8 @@ pub enum FetchType<'a> {
 	},
 }
 
-impl<V: Copy> Encode<V> for FetchType<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for FetchType<'_> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
 			FetchType::Standalone {
 				namespace,
@@ -64,8 +68,8 @@ impl<V: Copy> Encode<V> for FetchType<'_> {
 	}
 }
 
-impl<V: Copy> Decode<V> for FetchType<'_> {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for FetchType<'_> {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let fetch_type = u64::decode(buf, version)?;
 		Ok(match fetch_type {
 			0x1 => {
@@ -130,6 +134,9 @@ impl Message for Fetch<'_> {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		Ok(())
 	}
@@ -171,6 +178,7 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -202,6 +210,9 @@ impl Message for FetchOk {
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
+			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
 			}
 		}
 		Ok(())
@@ -244,6 +255,7 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -304,15 +316,15 @@ impl FetchHeader {
 	pub const TYPE: u64 = 0x5;
 }
 
-impl<V> Encode<V> for FetchHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for FetchHeader {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for FetchHeader {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for FetchHeader {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}
@@ -394,6 +406,45 @@ mod tests {
 	}
 
 	#[test]
+	fn test_fetch_v16_round_trip() {
+		let msg = Fetch {
+			request_id: RequestId(1),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			fetch_type: FetchType::Standalone {
+				namespace: Path::new("test"),
+				track: "video".into(),
+				start: Location { group: 0, object: 0 },
+				end: Location { group: 10, object: 5 },
+			},
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: Fetch = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_fetch_v17_rejected() {
+		let msg = Fetch {
+			request_id: RequestId(1),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			fetch_type: FetchType::Standalone {
+				namespace: Path::new("test"),
+				track: "video".into(),
+				start: Location { group: 0, object: 0 },
+				end: Location { group: 10, object: 5 },
+			},
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
 	fn test_fetch_ok_v15_round_trip() {
 		let msg = FetchOk {
 			request_id: RequestId(2),
@@ -408,5 +459,35 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(2));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
+	}
+
+	#[test]
+	fn test_fetch_ok_v16_round_trip() {
+		let msg = FetchOk {
+			request_id: RequestId(2),
+			group_order: GroupOrder::Descending,
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: FetchOk = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(2));
+		assert!(!decoded.end_of_track);
+		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
+	}
+
+	#[test]
+	fn test_fetch_ok_v17_rejected() {
+		let msg = FetchOk {
+			request_id: RequestId(2),
+			group_order: GroupOrder::Descending,
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
 	}
 }

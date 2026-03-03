@@ -7,12 +7,15 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version},
+	ietf::{GroupOrder, Location, MessageParameters, Parameters, RequestId},
 };
 
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
-#[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
+use super::Version;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum FilterType {
 	NextGroup = 0x01,
@@ -21,15 +24,15 @@ pub enum FilterType {
 	AbsoluteRange = 0x4,
 }
 
-impl<V> Encode<V> for FilterType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for FilterType {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		u64::from(*self).encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for FilterType {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for FilterType {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
@@ -111,6 +114,7 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 
@@ -140,6 +144,9 @@ impl Message for Subscribe<'_> {
 				params.set_forward(true);
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
+			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
 			}
 		}
 
@@ -174,6 +181,9 @@ impl Message for SubscribeOk {
 				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
 				params.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -202,6 +212,9 @@ impl Message for SubscribeOk {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
+			Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		}
 
 		Ok(Self {
@@ -228,6 +241,7 @@ impl Message for SubscribeError<'_> {
 		self.reason_phrase.encode(w, version)?;
 		Ok(())
 	}
+
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let error_code = u64::decode(r, version)?;
@@ -295,6 +309,9 @@ impl Message for SubscribeUpdate {
 				params.set_subscription_filter(FilterType::LargestObject)?;
 				params.encode(w, version)?;
 			}
+			Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -337,6 +354,7 @@ impl Message for SubscribeUpdate {
 					forward,
 				})
 			}
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
