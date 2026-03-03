@@ -6,6 +6,35 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use super::{Frame, Timestamp};
 use crate::Error;
 
+/// A frame returned by [`OrderedConsumer::read()`] with group context.
+#[derive(Clone, Debug)]
+pub struct OrderedFrame {
+	/// The presentation timestamp for this frame.
+	pub timestamp: Timestamp,
+
+	/// The encoded media data for this frame, split into chunks.
+	pub payload: BufList,
+
+	/// The group sequence number this frame belongs to.
+	pub group: u64,
+
+	/// The frame index within the group (0 = first frame in the group).
+	///
+	/// With duration-based grouping (e.g. audio), the first frame is not
+	/// necessarily a keyframe — it only denotes position within the group.
+	pub frame: usize,
+}
+
+/// Lossy conversion: discards ordering metadata (`group` and `frame` fields).
+impl From<OrderedFrame> for Frame {
+	fn from(ordered: OrderedFrame) -> Self {
+		Frame {
+			timestamp: ordered.timestamp,
+			payload: ordered.payload,
+		}
+	}
+}
+
 /// A consumer for hang-formatted media tracks with timestamp reordering.
 ///
 /// This wraps a `moq_lite::TrackConsumer` and adds hang-specific functionality
@@ -50,7 +79,7 @@ impl OrderedConsumer {
 	/// configured latency target.
 	///
 	/// Returns `None` when the track has ended.
-	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
 		let latency = self.max_latency.try_into()?;
 		loop {
 			let cutoff = self.max_timestamp.checked_add(latency)?;
@@ -155,7 +184,7 @@ struct GroupReader {
 	index: usize,
 
 	// The any buffered frames in the group.
-	buffered: VecDeque<Frame>,
+	buffered: VecDeque<OrderedFrame>,
 
 	// The max timestamp in the group
 	max_timestamp: Option<Timestamp>,
@@ -171,34 +200,35 @@ impl GroupReader {
 		}
 	}
 
-	async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		if let Some(frame) = self.buffered.pop_front() {
-			Ok(Some(frame))
+	async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
+		if let Some(ordered) = self.buffered.pop_front() {
+			Ok(Some(ordered))
 		} else {
 			self.read_unbuffered().await
 		}
 	}
 
-	async fn read_unbuffered(&mut self) -> Result<Option<Frame>, Error> {
-		let Some(mut frame) = self.group.next_frame().await? else {
+	async fn read_unbuffered(&mut self) -> Result<Option<OrderedFrame>, Error> {
+		let Some(mut raw_frame) = self.group.next_frame().await? else {
 			return Ok(None);
 		};
-		let payload = frame.read_chunks().await?;
+		let payload = raw_frame.read_chunks().await?;
 
 		let mut payload = BufList::from_iter(payload);
 
 		let timestamp = Timestamp::decode(&mut payload)?;
-
-		let frame = Frame {
-			keyframe: (self.index == 0),
-			timestamp,
-			payload,
-		};
+		let sequence = self.group.info.sequence;
+		let frame_index = self.index;
 
 		self.index += 1;
 		self.max_timestamp = Some(self.max_timestamp.unwrap_or_default().max(timestamp));
 
-		Ok(Some(frame))
+		Ok(Some(OrderedFrame {
+			timestamp,
+			payload,
+			group: sequence,
+			frame: frame_index,
+		}))
 	}
 
 	// Keep reading and buffering new frames, returning when `max` is larger than or equal to the cutoff.
@@ -239,12 +269,10 @@ mod tests {
 	}
 
 	/// Write a finished group with explicit sequence and timestamps.
-	/// First frame is marked as keyframe by the consumer (index == 0).
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
 			let frame = Frame {
-				keyframe: false, // ignored by encode; consumer sets keyframe based on index
 				timestamp,
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			};
@@ -254,7 +282,7 @@ mod tests {
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<Frame>, crate::Error> {
+	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<OrderedFrame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -284,7 +312,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].frame, 0);
 
 		// Next read returns None (track ended)
 		assert!(consumer.read().await.unwrap().is_none());
@@ -305,10 +333,9 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
-		// Only first frame is keyframe
-		assert!(frames[0].keyframe);
-		assert!(!frames[1].keyframe);
-		assert!(!frames[2].keyframe);
+		assert_eq!(frames[0].frame, 0);
+		assert_eq!(frames[1].frame, 1);
+		assert_eq!(frames[2].frame, 2);
 	}
 
 	#[tokio::test]
@@ -345,7 +372,6 @@ mod tests {
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
 			Frame {
-				keyframe: false,
 				timestamp: ts(f * 2_000),
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			}
@@ -384,7 +410,6 @@ mod tests {
 		// buffer_until blocks for groups whose timestamps are < 400ms.
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(400_000),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -427,7 +452,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -484,7 +508,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished (blocks consumer, lets groups 2 and 1 accumulate in pending)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -659,7 +682,7 @@ mod tests {
 	// ---- Frame Decoding ----
 
 	#[tokio::test]
-	async fn frame_timestamp_and_keyframe_decoding() {
+	async fn frame_timestamp_and_index_decoding() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
@@ -671,13 +694,13 @@ mod tests {
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].frame, 0);
 
 		assert_eq!(frames[1].timestamp, ts(33_333));
-		assert!(!frames[1].keyframe);
+		assert_eq!(frames[1].frame, 1);
 
 		assert_eq!(frames[2].timestamp, ts(66_666));
-		assert!(!frames[2].keyframe);
+		assert_eq!(frames[2].frame, 2);
 	}
 
 	#[tokio::test]
@@ -689,7 +712,6 @@ mod tests {
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from(payload_bytes.clone())]),
 		}
@@ -731,7 +753,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -826,7 +847,6 @@ mod tests {
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
 			Frame {
-				keyframe: false,
 				timestamp,
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			}

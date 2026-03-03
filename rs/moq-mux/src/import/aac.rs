@@ -2,6 +2,10 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
+// Make a new audio group every 100ms.
+// NOTE: We could do this per-frame, but there's not much benefit to it.
+const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+
 /// Typed AAC configuration for initialization without binary blobs.
 pub struct AacConfig {
 	pub profile: u8,
@@ -131,9 +135,15 @@ impl Aac {
 
 		Ok(Self {
 			catalog,
-			track: track.into(),
+			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
 			zero: None,
 		})
+	}
+
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		self.track.finish()?;
+		Ok(())
 	}
 
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
@@ -147,12 +157,10 @@ impl Aac {
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: true, // Audio frames are always keyframes
 			payload,
 		};
 
 		self.track.write(frame)?;
-		self.track.flush()?; // We know the next frame will be a keyframe, so flush the current group.
 
 		Ok(())
 	}
