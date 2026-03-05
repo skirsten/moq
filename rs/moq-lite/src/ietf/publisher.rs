@@ -195,6 +195,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut cancel: oneshot::Receiver<()>,
 		version: Version,
 	) -> Result<(), Error> {
+		// Start the consumer at the latest group.
+		if let Some(start_group) = track.latest() {
+			track.start_at(start_group);
+		}
+
 		// TODO use a BTreeMap serve the latest N groups by sequence.
 		// Until then, we'll implement N=2 manually.
 		// Also, this is more complicated because we can't use tokio because of WASM.
