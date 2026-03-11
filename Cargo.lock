@@ -2261,7 +2261,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2616,7 +2616,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2658,7 +2658,7 @@ checksum = "f981dadd5a072a9e0efcd24bdcc388e570073f7e51b33505ceb1ef4668c80c86"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -4375,7 +4375,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4415,7 +4415,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6544,11 +6544,12 @@ dependencies = [
 
 [[package]]
 name = "web-transport-iroh"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11bbd05b9a024cd4b9f906c263cd6e943b175d30877da8145bfe90ea5a573ce8"
+checksum = "9e7c7c00efe0ba6bdc42cabe47646e8bc4df96d45d19892f92cb154f81b943a8"
 dependencies = [
  "bytes",
+ "derive_more",
  "http",
  "iroh",
  "n0-error",
@@ -6626,9 +6627,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-ws"
-version = "0.2.5"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b1cd89c36a28eae759329839e85f7dbca733896f048a6daaf5f8fc80f3bcba"
+checksum = "488d9dfc229815aa7739c60748dd2324ad48b50e753491b7049f7a1ce146c165"
 dependencies = [
  "bytes",
  "futures",
