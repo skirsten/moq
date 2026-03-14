@@ -154,6 +154,8 @@ jobs:
             # manylinux2014 ships GCC 4.8.5 which can't compile aws-lc-sys.
             # See: https://github.com/aws/aws-lc-rs/issues/1022
             manylinux: 2_28
+            # The cross image sets TARGET_CC/CXX which leaks into host builds.
+            before-script-linux: "unset TARGET_CC TARGET_CXX"
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: aarch64-apple-darwin
@@ -181,6 +183,10 @@ jobs:
           args: --release --out dist -m rs/moq-ffi/Cargo.toml
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
+          # The manylinux_2_28-cross image sets TARGET_CC/TARGET_CXX which
+          # leaks into host (x86_64) builds of aws-lc-sys, causing -m64 errors.
+          # Unsetting them is safe because CC_aarch64_unknown_linux_gnu is also set.
+          before-script-linux: ${{ matrix.before-script-linux || '' }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
