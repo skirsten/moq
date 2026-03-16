@@ -37,7 +37,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		await w.u53(0); // no parameters
+		await new Parameters().encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -211,6 +211,38 @@ export class SubscribeNamespaceEntryDone {
 	static async #decode(r: Reader): Promise<SubscribeNamespaceEntryDone> {
 		const suffix = await Namespace.decode(r);
 		return new SubscribeNamespaceEntryDone({ suffix });
+	}
+}
+
+/// PUBLISH_BLOCKED message (0x0F) — draft-17 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+export class PublishBlocked {
+	static id = 0x0f;
+
+	suffix: Path.Valid;
+	trackName: string;
+
+	constructor({ suffix, trackName }: { suffix: Path.Valid; trackName: string }) {
+		this.suffix = suffix;
+		this.trackName = trackName;
+	}
+
+	async #encode(w: Writer): Promise<void> {
+		await Namespace.encode(w, this.suffix);
+		await w.string(this.trackName);
+	}
+
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishBlocked> {
+		return Message.decode(r, PublishBlocked.#decode);
+	}
+
+	static async #decode(r: Reader): Promise<PublishBlocked> {
+		const suffix = await Namespace.decode(r);
+		const trackName = await r.string();
+		return new PublishBlocked({ suffix, trackName });
 	}
 }
 
