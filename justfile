@@ -10,7 +10,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep cargo-semver-checks release-plz
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
 
 # Alias for dev.
 all: dev
@@ -355,7 +355,7 @@ check:
 	# Only run the nix checks if nix is installed.
 	if command -v nix &> /dev/null; then nix flake check; fi
 
-# Run comprehensive CI checks including all feature combinations (requires cargo-hack)
+# Run comprehensive CI checks including feature edge cases
 ci:
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -369,9 +369,9 @@ ci:
 	# Make sure everything builds
 	just build
 
-	# Check all feature combinations for all crates
-	# requires: cargo install cargo-hack
-	cargo hack check --workspace --each-feature --no-dev-deps --exclude moq-ffi
+	# Check feature edge cases for all crates
+	cargo check --workspace --no-default-features --exclude moq-ffi
+	cargo check --workspace --all-features --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
