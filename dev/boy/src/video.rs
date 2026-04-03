@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
@@ -7,14 +10,15 @@ use crate::emulator::{HEIGHT, WIDTH};
 /// Receives RGBA frames, encodes to H.264, publishes via MoQ.
 pub struct VideoEncoder {
     tx: tokio::sync::mpsc::Sender<EncoderMsg>,
+    /// Clone of the video track producer, for monitoring used/unused.
+    pub track: moq_lite::TrackProducer,
+    force_keyframe: Arc<AtomicBool>,
     _thread: std::thread::JoinHandle<()>,
 }
 
-enum EncoderMsg {
-    Frame {
-        rgba: Bytes,
-        ts: hang::container::Timestamp,
-    },
+struct EncoderMsg {
+    rgba: Bytes,
+    ts: hang::container::Timestamp,
 }
 
 impl VideoEncoder {
@@ -24,34 +28,44 @@ impl VideoEncoder {
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
+        let force_keyframe = Arc::new(AtomicBool::new(false));
 
+        let track = avc3.track().clone();
+
+        let fk = force_keyframe.clone();
         let thread = std::thread::Builder::new()
             .name("video-encoder".into())
-            .spawn(move || encoder_thread(rx, avc3))
+            .spawn(move || encoder_thread(rx, avc3, fk))
             .expect("failed to spawn video encoder thread");
 
         Self {
             tx,
+            track,
+            force_keyframe,
             _thread: thread,
         }
     }
 
     /// Send a frame to the encoder. Non-blocking: drops the frame if the channel is full.
     pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
-        let _ = self.tx.try_send(EncoderMsg::Frame { rgba, ts });
+        let _ = self.tx.try_send(EncoderMsg { rgba, ts });
+    }
+
+    /// Force the next encoded frame to be a keyframe. Cannot be lost.
+    pub fn force_keyframe(&self) {
+        self.force_keyframe.store(true, Ordering::Release);
     }
 }
 
 fn encoder_thread(
     mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
     mut avc3: moq_mux::import::Avc3,
+    force_keyframe: Arc<AtomicBool>,
 ) {
     let mut encoder: Option<Encoder> = None;
     let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
 
     while let Some(msg) = rx.blocking_recv() {
-        let EncoderMsg::Frame { rgba, ts } = msg;
-
         let enc = lazy_init(
             &mut encoder,
             || Encoder::new(WIDTH, HEIGHT),
@@ -67,7 +81,7 @@ fn encoder_thread(
                     ffmpeg_next::format::Pixel::YUV420P,
                     WIDTH,
                     HEIGHT,
-                    ffmpeg_next::software::scaling::Flags::POINT, // Nearest-neighbor for pixel art
+                    ffmpeg_next::software::scaling::Flags::POINT,
                 )
                 .map_err(Into::into)
             },
@@ -78,7 +92,7 @@ fn encoder_thread(
             return;
         };
 
-        let yuv = match rgba_to_yuv(&rgba, color_scaler, enc.frame_count) {
+        let mut yuv = match rgba_to_yuv(&msg.rgba, color_scaler, enc.frame_count) {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!(error = %e, "RGBA->YUV failed");
@@ -86,7 +100,11 @@ fn encoder_thread(
             }
         };
 
-        if let Err(e) = enc.encode_yuv(&yuv, ts, &mut avc3) {
+        if force_keyframe.swap(false, Ordering::AcqRel) {
+            yuv.set_kind(ffmpeg_next::picture::Type::I);
+        }
+
+        if let Err(e) = enc.encode_yuv(&yuv, msg.ts, &mut avc3) {
             tracing::error!(error = %e, "H.264 encode error");
         }
     }
@@ -158,8 +176,6 @@ impl Encoder {
         let mut opts = ffmpeg_next::Dictionary::new();
         opts.set("preset", "ultrafast");
         opts.set("tune", "zerolatency");
-        // Use CRF for quality-based encoding instead of fixed bitrate.
-        // CRF 18 is visually lossless for pixel art at this tiny resolution.
         opts.set("crf", "18");
         let encoder = enc.open_with(opts)?;
 
