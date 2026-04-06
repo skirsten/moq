@@ -12,7 +12,6 @@ export interface GameStats {
 
 export interface GameStatus {
 	buttons: string[];
-	reset_in: number;
 	latency: Record<string, number>;
 	stats?: GameStats;
 }
@@ -23,6 +22,9 @@ export interface GameCardConfig {
 	expanded: Moq.Signals.Signal<string | undefined>;
 	root: ShadowRoot | HTMLElement;
 }
+
+// Stop publishing feedback after 60s of no input.
+const FEEDBACK_IDLE_MS = 60_000;
 
 // Key mapping for keyboard input.
 const KEY_MAP: Record<string, string> = {
@@ -61,11 +63,6 @@ export class GameCard {
 		label.className = "label";
 		label.textContent = sessionId;
 		this.el.appendChild(label);
-
-		// Countdown overlay.
-		const countdown = document.createElement("div");
-		countdown.className = "countdown";
-		this.el.appendChild(countdown);
 
 		// Controls container.
 		const controls = document.createElement("div");
@@ -234,7 +231,7 @@ export class GameCard {
 			audioEmitter.muted.set(muted || !active);
 		});
 
-		// Subscribe to status track for button highlights and countdown.
+		// Subscribe to status track for button highlights and latency.
 		this.#signals.run((effect) => {
 			const active = effect.get(broadcast.active);
 			if (!active) return;
@@ -254,14 +251,6 @@ export class GameCard {
 					for (const btn of allBtns) {
 						const name = (btn as HTMLElement).dataset.button;
 						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
-					}
-
-					// Show countdown when approaching timeout.
-					if (json.reset_in <= 60) {
-						countdown.style.display = "block";
-						countdown.textContent = `Reset in ${json.reset_in}s`;
-					} else {
-						countdown.style.display = "none";
 					}
 
 					// Show per-viewer latency.
@@ -325,15 +314,29 @@ export class GameCard {
 			});
 		});
 
-		// Command publishing.
+		// Command publishing — only publish feedback broadcast when there's recent input.
 		let commandTrack: Moq.Track | undefined;
+		let pendingCommand: Record<string, unknown> | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
+		const feedbackActive = new Moq.Signals.Signal(false);
+		let feedbackTimeout: Moq.Signals.Effect | undefined;
+
+		this.#signals.cleanup(() => feedbackTimeout?.close());
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
 			if (!conn) return;
 
-			if (!effect.get(isActive)) return;
+			if (!effect.get(isActive)) {
+				// Clear feedback state when deactivating.
+				feedbackActive.set(false);
+				feedbackTimeout?.close();
+				pendingCommand = undefined;
+				return;
+			}
+
+			const active = effect.get(feedbackActive);
+			if (!active) return;
 
 			const viewerId = Math.random().toString(36).slice(2, 8);
 			currentViewerId.set(viewerId);
@@ -342,19 +345,37 @@ export class GameCard {
 			effect.cleanup(() => {
 				viewerBroadcast.close();
 				commandTrack = undefined;
+				currentViewerId.set(undefined);
 			});
 
 			effect.spawn(async () => {
 				for (;;) {
 					const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 					if (!req) break;
-					if (req.track.name === "command") commandTrack = req.track;
+					if (req.track.name === "command") {
+						commandTrack = req.track;
+						// Flush any pending command that triggered activation.
+						if (pendingCommand) {
+							const ts = videoDecoder.timestamp.peek();
+							commandTrack.writeJson({ ...pendingCommand, ts: ts ?? 0 });
+							pendingCommand = undefined;
+						}
+					}
 				}
 			});
 		});
 
 		this.#sendCommand = (cmd: Record<string, unknown>) => {
-			if (!commandTrack) return;
+			// Activate feedback broadcasting on input, with idle timeout.
+			feedbackActive.set(true);
+			feedbackTimeout?.close();
+			feedbackTimeout = new Moq.Signals.Effect();
+			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
+
+			if (!commandTrack) {
+				pendingCommand = cmd;
+				return;
+			}
 			// Attach the current video timestamp so the publisher can measure latency.
 			const ts = videoDecoder.timestamp.peek();
 			commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });

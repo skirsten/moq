@@ -72,7 +72,6 @@ struct StatsReport {
 #[derive(Serialize)]
 struct Status {
 	buttons: Vec<emulator::Button>,
-	reset_in: u64,
 	latency: BTreeMap<String, u32>,
 	stats: StatsReport,
 }
@@ -267,10 +266,9 @@ async fn run(config: &Config) -> Result<()> {
 
 		let frame_duration = Duration::from_micros(16_742); // ~59.73fps
 		let mut next_frame = Instant::now();
-		let mut last_input = Instant::now();
 		let mut last_status = String::new();
 		let timeout = Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, (f64, Instant)> = std::collections::HashMap::new();
+		let mut viewer_latency: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 		let mut stats = Stats::new();
 
 		loop {
@@ -279,9 +277,26 @@ async fn run(config: &Config) -> Result<()> {
 				tracing::info!("pausing encoding");
 				let (lock, cvar) = &*resume_notify;
 				let mut guard = lock.lock().unwrap();
+				let pause_start = std::time::Instant::now();
+
+				let mut reset_done = false;
 				while paused.load(Ordering::Acquire) {
-					guard = cvar.wait(guard).unwrap();
+					if !reset_done && pause_start.elapsed() >= timeout {
+						tracing::info!("resetting emulator (paused too long)");
+						emu.reset()?;
+						stats = Stats::new();
+						reset_done = true;
+					}
+
+					if reset_done {
+						guard = cvar.wait(guard).unwrap();
+					} else {
+						let remaining = timeout - pause_start.elapsed();
+						let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
+						guard = g;
+					}
 				}
+
 				tracing::info!("resuming encoding");
 				// Don't try to catch up after a pause.
 				next_frame = Instant::now();
@@ -315,11 +330,10 @@ async fn run(config: &Config) -> Result<()> {
 						ts_ms,
 					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						last_input = Instant::now();
 
 						let latency = current_ts_ms - ts_ms;
 						if latency >= 0.0 {
-							viewer_latency.insert(viewer_id, (latency, Instant::now()));
+							viewer_latency.insert(viewer_id, latency);
 						}
 					}
 					input::Command::ViewerLeft { viewer_id } => {
@@ -329,41 +343,22 @@ async fn run(config: &Config) -> Result<()> {
 					input::Command::Reset => {
 						tracing::info!("resetting emulator (viewer request)");
 						emu.reset()?;
-						last_input = Instant::now();
 						stats = Stats::new();
 					}
 				}
 			}
 
-			// Check inactivity timeout.
-			let idle_time = Instant::now() - last_input;
-			if idle_time > timeout {
-				tracing::info!("resetting emulator (inactivity timeout)");
-				emu.reset()?;
-				last_input = Instant::now();
-				stats = Stats::new();
-			}
-
 			// Tick the emulator.
 			emu.tick();
 
-			// Expire stale viewer latency entries (no input for 30s).
-			let stale = Duration::from_secs(30);
-			viewer_latency.retain(|_, (_, last_seen)| last_seen.elapsed() < stale);
-
 			// Publish status.
 			let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-			let idle_secs = idle_time.as_secs();
-			let remaining = timeout_secs.saturating_sub(idle_secs);
 
-			let latency_map: BTreeMap<String, u32> = viewer_latency
-				.iter()
-				.map(|(k, (ms, _))| (k.clone(), *ms as u32))
-				.collect();
+			let latency_map: BTreeMap<String, u32> =
+				viewer_latency.iter().map(|(k, ms)| (k.clone(), *ms as u32)).collect();
 
 			let status = Status {
 				buttons: held,
-				reset_in: remaining,
 				latency: latency_map,
 				stats: stats.report(),
 			};
