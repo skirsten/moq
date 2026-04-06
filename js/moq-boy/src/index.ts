@@ -70,7 +70,7 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList, statsList, muteBtn } = this.#buildControls();
+		const { wrapper: controlsInner, latencyList, statsList, muteBtn, jitterSlider } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Track hover state (before keyboard setup so handlers can use it).
@@ -164,7 +164,8 @@ export class GameCard {
 		});
 		this.#signals.cleanup(() => broadcast.close());
 
-		const sync = new Watch.Sync({ jitter: 50 as Moq.Time.Milli });
+		const jitter = new Moq.Signals.Signal<Moq.Time.Milli>(50 as Moq.Time.Milli);
+		const sync = new Watch.Sync({ jitter });
 		this.#signals.cleanup(() => sync.close());
 
 		const videoSource = new Watch.Video.Source(sync, { broadcast });
@@ -381,6 +382,11 @@ export class GameCard {
 			commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
 		};
 
+		// Wire up jitter slider to sync.
+		jitterSlider.addEventListener("input", () => {
+			jitter.set(Number.parseInt(jitterSlider.value, 10) as Moq.Time.Milli);
+		});
+
 		// Wire up mute toggle button.
 		muteBtn.textContent = "Mute";
 		muteBtn.addEventListener("click", (e) => {
@@ -397,6 +403,7 @@ export class GameCard {
 		latencyList: HTMLElement;
 		statsList: HTMLElement;
 		muteBtn: HTMLButtonElement;
+		jitterSlider: HTMLInputElement;
 	} {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
@@ -474,6 +481,28 @@ export class GameCard {
 		});
 		utilBtns.appendChild(resetBtn);
 
+		// Jitter/latency slider
+		const jitterContainer = document.createElement("div");
+		jitterContainer.className = "jitter-container";
+
+		const jitterLabel = document.createElement("label");
+		jitterLabel.className = "jitter-label";
+		jitterLabel.textContent = "Buffer: 50ms";
+
+		const jitterSlider = document.createElement("input");
+		jitterSlider.type = "range";
+		jitterSlider.className = "jitter-slider";
+		jitterSlider.min = "0";
+		jitterSlider.max = "500";
+		jitterSlider.value = "50";
+		jitterSlider.addEventListener("input", () => {
+			jitterLabel.textContent = `Buffer: ${jitterSlider.value}ms`;
+		});
+		jitterSlider.addEventListener("click", (e) => e.stopPropagation());
+
+		jitterContainer.appendChild(jitterLabel);
+		jitterContainer.appendChild(jitterSlider);
+
 		// Key hints
 		const hints = document.createElement("div");
 		hints.className = "key-hints";
@@ -492,6 +521,7 @@ export class GameCard {
 		wrapper.appendChild(abBtns);
 		wrapper.appendChild(metaBtns);
 		wrapper.appendChild(utilBtns);
+		wrapper.appendChild(jitterContainer);
 
 		const latencyNote = document.createElement("div");
 		latencyNote.className = "latency-note";
@@ -506,7 +536,7 @@ export class GameCard {
 		wrapper.appendChild(statsList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList, statsList, muteBtn };
+		return { wrapper, latencyList, statsList, muteBtn, jitterSlider };
 	}
 
 	#sendButtons() {

@@ -270,6 +270,7 @@ async fn run(config: &Config) -> Result<()> {
 		let timeout = Duration::from_secs(timeout_secs);
 		let mut viewer_latency: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 		let mut stats = Stats::new();
+		let mut was_audio_active = false;
 
 		loop {
 			// Pause emulation when no viewers are watching.
@@ -304,6 +305,8 @@ async fn run(config: &Config) -> Result<()> {
 				stats.last_tick = Instant::now();
 				// Force a keyframe so new viewers can start decoding.
 				video_encoder.force_keyframe();
+				// Re-anchor audio timestamps so the pause gap appears in PTS.
+				audio_encoder.reset_epoch();
 			}
 
 			// Wait for next frame.
@@ -313,8 +316,10 @@ async fn run(config: &Config) -> Result<()> {
 			}
 			next_frame += frame_duration;
 
-			// Current media timestamp in milliseconds.
-			let current_ts_ms = start.elapsed().as_secs_f64() * 1000.0;
+			// Capture a single reference timestamp for this tick.
+			// Used for both video and audio PTS so they stay aligned.
+			let elapsed = start.elapsed();
+			let current_ts_ms = elapsed.as_secs_f64() * 1000.0;
 
 			// Accumulate stats for this frame.
 			let is_video = video_active.load(Ordering::Relaxed);
@@ -376,16 +381,20 @@ async fn run(config: &Config) -> Result<()> {
 			// Grab and publish video frame (skip if no video viewers).
 			if is_video {
 				let rgba = Bytes::from(emu.framebuffer());
-				let pts_micros = start.elapsed().as_micros() as u64;
-				let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
+				let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64)
+					.context("timestamp overflow")?;
 				video_encoder.try_frame(rgba, ts);
 			}
 
 			// Grab and encode audio (skip if no audio viewers).
 			if is_audio {
+				// Re-anchor audio PTS when audio resumes after being inactive.
+				if !was_audio_active {
+					audio_encoder.reset_epoch();
+				}
 				let samples = emu.audio_samples();
 				if !samples.is_empty() {
-					if let Err(e) = audio_encoder.push_samples(&samples) {
+					if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
 						tracing::warn!(error = %e, "audio encode error");
 					}
 				}
@@ -393,6 +402,7 @@ async fn run(config: &Config) -> Result<()> {
 				// Drain audio buffer even when not encoding to prevent buildup.
 				emu.audio_samples();
 			}
+			was_audio_active = is_audio;
 		}
 	});
 
