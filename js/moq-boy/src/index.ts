@@ -13,6 +13,7 @@ export interface GameStats {
 export interface GameStatus {
 	buttons: string[];
 	latency: Record<string, number>;
+	location?: string;
 	stats?: GameStats;
 }
 
@@ -70,7 +71,14 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList, statsList, muteBtn, jitterSlider } = this.#buildControls();
+		const {
+			wrapper: controlsInner,
+			locationEl,
+			latencyList,
+			statsList,
+			muteBtn,
+			jitterSlider,
+		} = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Track hover state (before keyboard setup so handlers can use it).
@@ -254,6 +262,14 @@ export class GameCard {
 						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
 					}
 
+					// Show location if available.
+					if (json.location) {
+						locationEl.style.display = "block";
+						locationEl.textContent = json.location;
+					} else {
+						locationEl.style.display = "none";
+					}
+
 					// Show per-viewer latency.
 					const vid = currentViewerId.peek();
 					const entries = Object.entries(json.latency ?? {});
@@ -400,6 +416,7 @@ export class GameCard {
 
 	#buildControls(): {
 		wrapper: HTMLElement;
+		locationEl: HTMLElement;
 		latencyList: HTMLElement;
 		statsList: HTMLElement;
 		muteBtn: HTMLButtonElement;
@@ -513,6 +530,11 @@ export class GameCard {
 			hints.appendChild(div);
 		}
 
+		// Location label (populated by status track)
+		const locationEl = document.createElement("div");
+		locationEl.className = "location";
+		locationEl.style.display = "none";
+
 		// Latency list (populated by status track)
 		const latencyList = document.createElement("div");
 		latencyList.className = "latency-list";
@@ -532,11 +554,12 @@ export class GameCard {
 		statsList.className = "stats-list";
 
 		wrapper.appendChild(hints);
+		wrapper.appendChild(locationEl);
 		wrapper.appendChild(latencyList);
 		wrapper.appendChild(statsList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList, statsList, muteBtn, jitterSlider };
+		return { wrapper, locationEl, latencyList, statsList, muteBtn, jitterSlider };
 	}
 
 	#sendButtons() {

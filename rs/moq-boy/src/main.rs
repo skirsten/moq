@@ -74,6 +74,8 @@ struct Status {
 	buttons: Vec<emulator::Button>,
 	latency: BTreeMap<String, u32>,
 	stats: StatsReport,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	location: Option<String>,
 }
 
 #[derive(Parser, Clone)]
@@ -93,6 +95,10 @@ pub struct Config {
 	/// Inactivity timeout in seconds before auto-reset.
 	#[arg(long, default_value_t = 300)]
 	pub timeout: u64,
+
+	/// Location label shown in viewer stats (e.g. "Dallas, TX").
+	#[arg(long)]
+	pub location: Option<String>,
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
@@ -248,6 +254,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Run the emulator on a blocking thread.
 	let timeout_secs = config.timeout;
+	let location = config.location.clone();
 	let emulator_handle = tokio::task::spawn_blocking(move || -> Result<()> {
 		let mut emu = emulator::Emulator::new(&rom_path)?;
 		let start = std::time::Instant::now();
@@ -366,6 +373,7 @@ async fn run(config: &Config) -> Result<()> {
 				buttons: held,
 				latency: latency_map,
 				stats: stats.report(),
+				location: location.clone(),
 			};
 
 			let new_status_str = serde_json::to_string(&status).unwrap();

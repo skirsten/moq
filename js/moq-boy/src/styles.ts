@@ -32,6 +32,12 @@ export const cardStyles = `
 		border-radius: 4px; font-family: monospace; font-size: 0.7rem;
 	}
 
+	/* Location label in controls panel */
+	.location {
+		width: 100%; font-family: monospace; font-size: 0.65rem;
+		color: #8bac0f; text-align: center; margin-bottom: 0.3rem;
+	}
+
 	/* Viewer latency list in controls panel */
 	.latency-list {
 		width: 100%; font-family: monospace; font-size: 0.65rem;
