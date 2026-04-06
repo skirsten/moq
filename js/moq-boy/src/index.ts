@@ -3,10 +3,18 @@ import * as Watch from "@moq/watch";
 
 export { Moq, Watch };
 
+export interface GameStats {
+	video_secs: number;
+	audio_secs: number;
+	emulation_secs: number;
+	wall_secs: number;
+}
+
 export interface GameStatus {
 	buttons: string[];
 	reset_in: number;
 	latency: Record<string, number>;
+	stats?: GameStats;
 }
 
 export interface GameCardConfig {
@@ -65,7 +73,7 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
+		const { wrapper: controlsInner, latencyList, statsList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Click to toggle expand via Fullscreen API.
@@ -283,6 +291,36 @@ export class GameCard {
 							latencyList.appendChild(row);
 						}
 					}
+
+					// Stats panel: show encoding/emulation time.
+					if (json.stats) {
+						const s = json.stats;
+						const pct = (v: number) => (s.wall_secs > 0 ? Math.round((v / s.wall_secs) * 100) : 0);
+
+						statsList.replaceChildren();
+						const statsHeader = document.createElement("div");
+						statsHeader.className = "stats-header";
+						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
+						statsList.appendChild(statsHeader);
+
+						const items: [string, number][] = [
+							["Video", s.video_secs],
+							["Audio", s.audio_secs],
+							["Emulation", s.emulation_secs],
+						];
+
+						for (const [itemLabel, secs] of items) {
+							const row = document.createElement("div");
+							row.className = "stats-entry";
+							const nameSpan = document.createElement("span");
+							nameSpan.textContent = itemLabel;
+							const valSpan = document.createElement("span");
+							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
+							row.appendChild(nameSpan);
+							row.appendChild(valSpan);
+							statsList.appendChild(row);
+						}
+					}
 				}
 			});
 		});
@@ -334,7 +372,12 @@ export class GameCard {
 		});
 	}
 
-	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
+	#buildControls(): {
+		wrapper: HTMLElement;
+		latencyList: HTMLElement;
+		statsList: HTMLElement;
+		muteBtn: HTMLButtonElement;
+	} {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -434,11 +477,16 @@ export class GameCard {
 		latencyNote.className = "latency-note";
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
 
+		// Stats list (populated by status track)
+		const statsList = document.createElement("div");
+		statsList.className = "stats-list";
+
 		wrapper.appendChild(hints);
 		wrapper.appendChild(latencyList);
+		wrapper.appendChild(statsList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList, muteBtn };
+		return { wrapper, latencyList, statsList, muteBtn };
 	}
 
 	#sendButtons() {
