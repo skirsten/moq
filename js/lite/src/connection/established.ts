@@ -1,7 +1,9 @@
+import type { Signal } from "@moq/signals";
 import type { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type * as Path from "../path.ts";
+import type * as Time from "../time.ts";
 
 // Both moq-lite and moq-ietf implement this.
 export interface Established {
@@ -13,6 +15,9 @@ export interface Established {
 
 	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
 	readonly recvBandwidth?: Bandwidth;
+
+	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
+	readonly rtt?: Signal<Time.Milli | undefined>;
 
 	announced(prefix?: Path.Valid): Announced;
 	publish(path: Path.Valid, broadcast: Broadcast): void;
