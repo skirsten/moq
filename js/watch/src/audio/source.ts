@@ -8,7 +8,7 @@ import type { Sync } from "../sync";
 const WORKLET_QUANTUM = 128;
 
 // Extra milliseconds for decode + postMessage latency between main thread and worklet.
-const POST_MESSAGE_OVERHEAD = 5;
+const POST_MESSAGE_OVERHEAD = 10;
 
 export type Target = {
 	// Optional manual override for the selected rendition name.
