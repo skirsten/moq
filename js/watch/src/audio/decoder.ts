@@ -102,10 +102,13 @@ export class Decoder {
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;
 
-			// Create the worklet node
+			// Create the worklet node. outputChannelCount must be set explicitly
+			// so the process() callback receives a matching channel layout —
+			// Firefox defaults differently than Chrome otherwise.
 			const worklet = new AudioWorkletNode(context, "render", {
 				channelCount,
 				channelCountMode: "explicit",
+				outputChannelCount: [channelCount],
 			});
 			effect.cleanup(() => worklet.disconnect());
 
@@ -345,8 +348,11 @@ export class Decoder {
 		// Add to decode buffer
 		this.#addDecodeBuffered(timestampMilli, end);
 
+		// Firefox's Opus decoder sometimes outputs more channels than requested
+		// (e.g. 6 for stereo). Clamp to the ring's channel count.
+		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
-		for (let channel = 0; channel < sample.numberOfChannels; channel++) {
+		for (let channel = 0; channel < channels; channel++) {
 			const data = new Float32Array(sample.numberOfFrames);
 			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
 			channelData.push(data);
