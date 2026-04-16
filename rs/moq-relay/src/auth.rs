@@ -109,12 +109,15 @@ pub struct AuthTls {
 	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
 	pub root: Vec<PathBuf>,
 
-	/// Present a client certificate during the TLS handshake (mTLS).
-	///
-	/// Bundled PEM containing both the cert chain and the private key.
+	/// PEM file containing the client certificate chain for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-identity", long = "auth-tls-identity", env = "MOQ_AUTH_TLS_IDENTITY")]
-	pub identity: Option<PathBuf>,
+	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT")]
+	pub cert: Option<PathBuf>,
+
+	/// PEM file containing the private key for mTLS.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY")]
+	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification on auth requests.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -133,12 +136,19 @@ pub struct AuthTls {
 impl AuthTls {
 	/// Convert into a [`moq_native::ClientTls`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
-	fn to_client_tls(&self) -> moq_native::ClientTls {
+	fn to_client_tls(&self) -> anyhow::Result<moq_native::ClientTls> {
+		match (&self.cert, &self.key) {
+			(Some(_), None) => anyhow::bail!("--auth-tls-cert requires --auth-tls-key"),
+			(None, Some(_)) => anyhow::bail!("--auth-tls-key requires --auth-tls-cert"),
+			_ => {}
+		}
+
 		let mut tls = moq_native::ClientTls::default();
 		tls.root = self.root.clone();
-		tls.identity = self.identity.clone();
+		tls.cert = self.cert.clone();
+		tls.key = self.key.clone();
 		tls.disable_verify = self.disable_verify;
-		tls
+		Ok(tls)
 	}
 }
 
@@ -489,7 +499,7 @@ impl Auth {
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
-		let tls = config.tls.to_client_tls().build()?;
+		let tls = config.tls.to_client_tls()?.build()?;
 
 		let source = if let Some(key) = config.key {
 			let source = if let Ok(url) = Url::parse(&key) {
