@@ -2,12 +2,15 @@ import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
+export type RendererMode = "push" | "pull";
+
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	mode?: RendererMode | Signal<RendererMode>;
 };
 
-// An component to render a video to a canvas.
+// A component to render a video to a canvas.
 export class Renderer {
 	decoder: Decoder;
 
@@ -16,6 +19,10 @@ export class Renderer {
 
 	// Whether the video is paused.
 	paused: Signal<boolean>;
+
+	// "push" re-renders each time the decoder publishes a new frame; "pull" drives a
+	// continuous rAF loop and redraws only when the decoder's current frame differs.
+	mode: Signal<RendererMode>;
 
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
@@ -31,6 +38,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
+		this.mode = Signal.from(props?.mode ?? "push");
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -108,6 +116,15 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
+		const mode = effect.get(this.mode);
+		if (mode === "push") {
+			this.#runPush(effect, ctx);
+		} else {
+			this.#runPull(effect, ctx);
+		}
+	}
+
+	#runPush(effect: Effect, ctx: CanvasRenderingContext2D) {
 		const paused = effect.get(this.paused);
 
 		// Read new frames from the decoder when not paused.
@@ -120,7 +137,7 @@ export class Renderer {
 		// Always render, even when paused (to show last frame)
 		let animate: number | undefined = requestAnimationFrame(() => {
 			const frame = decoded ?? this.frame.peek();
-			this.#render(ctx, frame);
+			this.#draw(ctx, frame);
 
 			// Update signals to reflect what's actually on screen.
 			if (decoded) {
@@ -141,7 +158,32 @@ export class Renderer {
 		});
 	}
 
-	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
+	#runPull(effect: Effect, ctx: CanvasRenderingContext2D) {
+		let lastDrawn: VideoFrame | undefined;
+		let rafId: number | undefined;
+
+		const tick = () => {
+			const current = this.decoder.frame.peek();
+			if (current && current !== lastDrawn) {
+				this.#draw(ctx, current);
+				this.frame.update((old) => {
+					old?.close();
+					return current.clone();
+				});
+				this.timestamp.set(Time.Milli.fromMicro(current.timestamp as Time.Micro));
+				lastDrawn = current;
+			}
+			rafId = requestAnimationFrame(tick);
+		};
+
+		rafId = requestAnimationFrame(tick);
+
+		effect.cleanup(() => {
+			if (rafId !== undefined) cancelAnimationFrame(rafId);
+		});
+	}
+
+	#draw(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
 		if (!frame) {
 			// Clear canvas when no frame
 			ctx.fillStyle = "#000";
