@@ -212,6 +212,7 @@ export class MultiBackend implements Backend {
 
 		effect.proxy(this.audio.stats, audio.stats);
 		effect.proxy(this.audio.buffered, audio.buffered);
+		effect.proxy(this.audio.context, audio.context);
 	}
 
 	close(): void {
