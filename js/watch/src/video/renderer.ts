@@ -7,7 +7,7 @@ export type RendererProps = {
 	paused?: boolean | Signal<boolean>;
 };
 
-// An component to render a video to a canvas.
+// A component to render a video to a canvas.
 export class Renderer {
 	decoder: Decoder;
 
@@ -108,40 +108,30 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const paused = effect.get(this.paused);
+		let rafId: number | undefined;
 
-		// Read new frames from the decoder when not paused.
-		let decoded: VideoFrame | undefined;
-		if (!paused) {
-			decoded = effect.get(this.decoder.frame);
-		}
-
-		// Request a callback to render the frame based on the monitor's refresh rate.
-		// Always render, even when paused (to show last frame)
-		let animate: number | undefined = requestAnimationFrame(() => {
-			const frame = decoded ?? this.frame.peek();
-			this.#render(ctx, frame);
-
-			// Update signals to reflect what's actually on screen.
-			if (decoded) {
+		const tick = () => {
+			const frame = this.decoder.consume();
+			if (frame) {
+				this.#draw(ctx, frame);
 				this.frame.update((old) => {
 					old?.close();
-					return decoded.clone();
+					return frame; // transfer ownership from consume()
 				});
-				this.timestamp.set(Time.Milli.fromMicro(decoded.timestamp as Time.Micro));
+				this.timestamp.set(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 			}
 
-			animate = undefined;
-		});
+			rafId = requestAnimationFrame(tick);
+		};
 
-		// Clean up any pending animation request.
+		rafId = requestAnimationFrame(tick);
+
 		effect.cleanup(() => {
-			decoded?.close();
-			if (animate) cancelAnimationFrame(animate);
+			if (rafId !== undefined) cancelAnimationFrame(rafId);
 		});
 	}
 
-	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
+	#draw(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
 		if (!frame) {
 			// Clear canvas when no frame
 			ctx.fillStyle = "#000";
