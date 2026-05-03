@@ -280,15 +280,24 @@ export class Consumer {
 				throw new Error("multiple calls to decode not supported");
 			}
 
-			const wait = new Promise<void>((resolve) => {
-				this.#notify = resolve;
-			}).then(() => true);
+			// Wait for either a new frame (notify) or the consumer to close (abort).
+			// We listen on the AbortSignal directly and remove the listener when
+			// notify wins; racing against a never-settling Promise leaks a
+			// PromiseReaction per call (each one retaining the awaiter's result).
+			const abort = this.#signals.abort;
+			if (abort.aborted) return undefined;
 
-			if (!(await Promise.race([wait, this.#signals.closed]))) {
-				this.#notify = undefined;
-				// Consumer was closed while waiting for a new frame.
-				return undefined;
-			}
+			const aborted = await new Promise<boolean>((resolve) => {
+				const onAbort = () => resolve(true);
+				abort.addEventListener("abort", onAbort, { once: true });
+				this.#notify = () => {
+					abort.removeEventListener("abort", onAbort);
+					resolve(false);
+				};
+			});
+
+			this.#notify = undefined;
+			if (aborted) return undefined;
 		}
 	}
 

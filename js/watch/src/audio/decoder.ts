@@ -269,6 +269,14 @@ export class Decoder {
 			this.#buffered.update(() => decode);
 		});
 
+		// Track open groups so effect cleanup can close them; otherwise
+		// in-flight readFrame() awaits would never resolve when sub closes.
+		const openGroups = new Set<Moq.Group>();
+		effect.cleanup(() => {
+			for (const group of openGroups) group.close();
+			openGroups.clear();
+		});
+
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
@@ -294,6 +302,8 @@ export class Decoder {
 			for (;;) {
 				const group = await sub.recvGroup();
 				if (!group) break;
+
+				openGroups.add(group);
 
 				effect.spawn(async () => {
 					try {
@@ -322,6 +332,7 @@ export class Decoder {
 							}
 						}
 					} finally {
+						openGroups.delete(group);
 						group.close();
 					}
 				});

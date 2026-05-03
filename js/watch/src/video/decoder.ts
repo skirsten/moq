@@ -308,7 +308,12 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				// consumer.close() runs from effect.cleanup; that aborts the
+				// consumer, which makes next() return undefined and we break.
+				// Don't race against effect.cancel — racing a hot loop against
+				// a long-lived non-settling promise leaks a PromiseReaction
+				// per call.
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -376,19 +381,31 @@ class DecoderTrack {
 			this.buffered.update(() => decode);
 		});
 
+		// Track open groups so we can close them on cleanup. Closing the parent
+		// sub doesn't necessarily cascade to in-flight GroupConsumers, and we
+		// want recvGroup/readFrame to terminate naturally instead of racing
+		// against effect.cancel (which leaks PromiseReactions per call).
+		const openGroups = new Set<Moq.Group>();
+		effect.cleanup(() => {
+			for (const group of openGroups) group.close();
+			openGroups.clear();
+		});
+
 		effect.spawn(async () => {
 			// Process data segments
 			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await Promise.race([sub.recvGroup(), effect.cancel]);
+				const group = await sub.recvGroup();
 				if (!group) break;
+
+				openGroups.add(group);
 
 				effect.spawn(async () => {
 					let previous: Time.Micro | undefined;
 
 					try {
 						for (;;) {
-							const segment = await Promise.race([group.readFrame(), effect.cancel]);
+							const segment = await group.readFrame();
 							if (!segment) break;
 
 							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
@@ -422,6 +439,7 @@ class DecoderTrack {
 							}
 						}
 					} finally {
+						openGroups.delete(group);
 						group.close();
 					}
 				});
