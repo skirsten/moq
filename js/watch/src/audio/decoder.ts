@@ -92,6 +92,14 @@ export class Decoder {
 			latencyHint: "interactive", // We don't use real-time because of the buffer.
 			sampleRate,
 		});
+		console.info("[moq] audio context created", {
+			requestedSampleRate: sampleRate,
+			actualSampleRate: context.sampleRate,
+			baseLatency: context.baseLatency,
+			outputLatency: context.outputLatency,
+			channelCount,
+			state: context.state,
+		});
 		effect.set(this.#context, context);
 
 		effect.cleanup(() => context.close());
@@ -355,6 +363,12 @@ export class Decoder {
 		// Firefox's Opus decoder sometimes outputs more channels than requested
 		// (e.g. 6 for stereo). Clamp to the ring's channel count.
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
+		if (sample.numberOfChannels !== channels) {
+			console.info("[moq] audio: clamping decoded channels", {
+				decoded: sample.numberOfChannels,
+				ring: ring.channels,
+			});
+		}
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
 			const data = new Float32Array(sample.numberOfFrames);

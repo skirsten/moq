@@ -335,7 +335,9 @@ export class Encoder {
 
 		// Try hardware encoding first.
 		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-		if (!Util.Hacks.isFirefox) {
+		if (Util.Hacks.isFirefox) {
+			console.info("[moq] firefox: skipping hardware encoder probe, falling through to software");
+		} else {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 
@@ -353,7 +355,10 @@ export class Encoder {
 				};
 
 				const { supported } = await VideoEncoder.isConfigSupported(hardware);
-				if (supported) return { codec, hardwareAcceleration };
+				if (supported) {
+					console.info("[moq] encoder: selected", { codec, mode: "hardware" });
+					return { codec, hardwareAcceleration };
+				}
 			}
 		}
 
@@ -375,7 +380,10 @@ export class Encoder {
 			};
 
 			const { supported } = await VideoEncoder.isConfigSupported(software);
-			if (supported) return { codec, hardwareAcceleration };
+			if (supported) {
+				console.info("[moq] encoder: selected", { codec, mode: "software" });
+				return { codec, hardwareAcceleration };
+			}
 		}
 
 		throw new Error("no supported codec");
