@@ -55,6 +55,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	// Create a cancel promise to kill whichever is still connecting.
 	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
 
+	if (isFirefox && globalThis.WebTransport) {
+		console.info("[moq] firefox: forcing WebSocket fallback (incoming bidi delivery bug)");
+	}
+
 	const webtransport =
 		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
