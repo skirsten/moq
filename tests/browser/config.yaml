@@ -1,0 +1,105 @@
+# The complete cross-browser test invocation. run.ts takes no CLI flags. It reads
+# this file and runs it:
+#
+#   bun run.ts                -> runs this config (one command, whole matrix)
+#   bun run.ts other.yaml     -> runs a different config file
+#
+# Credentials come from the environment (never put secrets in here):
+#   sauce        -> SAUCE_USERNAME / SAUCE_ACCESS_KEY
+#   browserstack -> BROWSERSTACK_USERNAME / BROWSERSTACK_ACCESS_KEY
+#   local        -> none (uses system browsers; mobile targets are skipped)
+
+# Where to point the browser:
+#   local        -> build demo/web, serve it, and (for remote targets) tunnel it
+#   <https url>  -> open that URL directly, e.g. https://moq.dev/watch/
+page: local
+
+relayUrl: https://cdn.moq.dev/demo
+broadcast: bbb
+playbackMs: 20000
+
+# Provider-specific settings. Each provider has its own section under `providers`.
+providers:
+  sauce:
+    # Sauce data center (used by sauce targets only).
+    region: eu-central-1
+
+# Build label shown in the provider dashboard. Empty -> local-YYYY-MM-DD.
+build: ""
+
+# Download each session's recording to <artifact-dir>/video.mp4.
+downloadVideo: true
+
+# The exact device matrix this run executes. Each target picks its own `provider`
+# (sauce | browserstack | local), so a single run can mix clouds, e.g. the same
+# Chrome/Windows on both Sauce and BrowserStack, or iOS on one and Android on the other.
+# Add/remove entries to change the run; only the providers actually used need credentials.
+#
+#   kind: desktop  -> browser + os + osVersion
+#   kind: mobile   -> platform + browser + device + osVersion   (real device clouds)
+targets:
+  - tag: chrome-windows
+    name: Chrome / Windows 11
+    provider: sauce
+    kind: desktop
+    browser: chrome
+    os: windows
+    osVersion: "11"
+
+  - tag: firefox-windows
+    name: Firefox / Windows 11
+    provider: sauce
+    kind: desktop
+    browser: firefox
+    os: windows
+    osVersion: "11"
+
+  - tag: edge-windows
+    name: Edge / Windows 11
+    provider: sauce
+    kind: desktop
+    browser: edge
+    os: windows
+    osVersion: "11"
+
+  - tag: safari-macos
+    name: Safari / macOS 13
+    provider: sauce
+    kind: desktop
+    browser: safari
+    os: macos
+    osVersion: "13"
+
+  - tag: chrome-macos
+    name: Chrome / macOS 13
+    provider: sauce
+    kind: desktop
+    browser: chrome
+    os: macos
+    osVersion: "13"
+
+  - tag: firefox-macos
+    name: Firefox / macOS 13
+    provider: sauce
+    kind: desktop
+    browser: firefox
+    os: macos
+    osVersion: "13"
+
+  - tag: safari-ios
+    name: Safari / iOS (real device)
+    provider: sauce
+    kind: mobile
+    platform: iOS
+    browser: safari
+    device: "iPhone.*"
+    osVersion: "26"
+
+  - tag: chrome-android
+    name: Chrome / Android (real device)
+    provider: sauce
+    kind: mobile
+    platform: Android
+    browser: chrome
+    device: ".*"
+    osVersion: "16"

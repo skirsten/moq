@@ -500,6 +500,7 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 			optimizeForLatency: config.optimizeForLatency ?? true,
 		});
 		if (retry.supported) {
+			console.info("[moq] safari workaround: rewriting codec", { from: config.codec, to: avc1 });
 			config.codec = avc1;
 			return true;
 		}

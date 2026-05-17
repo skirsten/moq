@@ -17,6 +17,9 @@ export default defineConfig({
 				publish: resolve(__dirname, "src/publish.html"),
 				mse: resolve(__dirname, "src/mse.html"),
 				manual: resolve(__dirname, "src/manual.html"),
+				// Minimal player + debug panel used by the cross-browser test runner
+				// in tests/browser/ (built and served by run.ts when config.yaml sets page: local).
+				test: resolve(__dirname, "src/test.html"),
 			},
 		},
 	},

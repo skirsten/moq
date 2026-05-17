@@ -1,0 +1,23 @@
+{
+	"name": "@moq/tests-browser",
+	"private": true,
+	"type": "module",
+	"version": "0.0.0",
+	"description": "Cross-browser playback tests (Win/macOS/iOS/Android) via WebdriverIO",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "bun run.ts",
+		"analyze": "bun analyze.ts"
+	},
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"cloudflared": "^0.7.1",
+		"sirv": "^3.0.0",
+		"typescript": "^6.0.0",
+		"webdriverio": "^9.0.0",
+		"yaml": "^2.6.0",
+		"zod": "^4.3.6"
+	}
+}

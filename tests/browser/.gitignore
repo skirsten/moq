@@ -1,0 +1,8 @@
+node_modules/
+test-results/
+*.mp4
+*.wav
+*.png
+.env
+.env.*
+!.env.example
