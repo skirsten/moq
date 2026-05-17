@@ -10,6 +10,7 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 		// Rewrite timestamps so they use our wall clock time instead of starting at 0.
 		// TODO verify all browsers actually start at 0.
 		const zero = performance.now() * 1000;
+		console.info("[moq] capture: using native MediaStreamTrackProcessor", { zeroOffsetUs: zero });
 
 		const rewrite = new TransformStream<VideoFrame>({
 			transform(frame, controller) {
