@@ -93,7 +93,10 @@ export class Subscriber {
 
 	async #runAnnounced(announced: Announced, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		const msg = new AnnounceInterest(prefix);
+		// Send our own session-level origin id so the peer can skip announces
+		// whose hop chain already passed through us. Matches the Rust subscriber's
+		// `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
+		const msg = new AnnounceInterest(prefix, this.origin);
 
 		try {
 			// Open a stream and send the announce interest.
@@ -250,7 +253,11 @@ export class Subscriber {
 	/**
 	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
 	 * Returns immediately if recv bandwidth is not supported.
-	 * Errors are fatal and propagate to the connection.
+	 *
+	 * Probe is best-effort telemetry: a stream-level failure (peer reset, FIN,
+	 * missing peer support, transport hiccup) is caught and logged, never
+	 * propagated to the connection. On exit the bandwidth/RTT signals are
+	 * cleared so consumers see them as stale.
 	 *
 	 * @internal
 	 */
@@ -258,16 +265,26 @@ export class Subscriber {
 		if (!this.#recvBandwidth) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Probe);
+		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
+		// transport hiccup) MUST NOT tear down the connection. On error, drop the
+		// bandwidth/RTT estimates so consumers know they're stale.
+		try {
+			const stream = await Stream.open(this.#quic);
+			await stream.writer.u53(StreamId.Probe);
 
-		for (;;) {
-			const probe = await Probe.decodeMaybe(stream.reader, this.version);
-			if (!probe) break;
-			this.#recvBandwidth.set(probe.bitrate || undefined);
-			if (this.#rtt && probe.rtt !== undefined) {
-				this.#rtt.set(probe.rtt as Time.Milli);
+			for (;;) {
+				const probe = await Probe.decodeMaybe(stream.reader, this.version);
+				if (!probe) break;
+				this.#recvBandwidth.set(probe.bitrate ?? undefined);
+				if (this.#rtt && probe.rtt !== undefined) {
+					this.#rtt.set(probe.rtt as Time.Milli);
+				}
 			}
+		} catch (err: unknown) {
+			console.warn("probe stream error", err);
+		} finally {
+			this.#recvBandwidth.set(undefined);
+			this.#rtt?.set(undefined);
 		}
 	}
 
