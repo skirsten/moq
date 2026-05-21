@@ -3749,7 +3749,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "moq-net"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "conducer",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.11.4"
+version = "0.11.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.25"
+version = "0.5.26"
 dependencies = [
  "anyhow",
  "clap",
