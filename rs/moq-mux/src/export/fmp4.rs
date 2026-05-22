@@ -280,13 +280,13 @@ fn build_init(catalog: &Catalog) -> anyhow::Result<Bytes> {
 	for config in catalog.video.renditions.values() {
 		match &config.container {
 			Container::Cmaf { init, .. } => track_inits.push(init),
-			Container::Legacy => anyhow::bail!("track is not CMAF"),
+			Container::Legacy | Container::Loc => anyhow::bail!("track is not CMAF"),
 		}
 	}
 	for config in catalog.audio.renditions.values() {
 		match &config.container {
 			Container::Cmaf { init, .. } => track_inits.push(init),
-			Container::Legacy => anyhow::bail!("track is not CMAF"),
+			Container::Legacy | Container::Loc => anyhow::bail!("track is not CMAF"),
 		}
 	}
 
@@ -437,12 +437,14 @@ fn catalog_timescale(catalog: &Catalog, name: &str) -> Option<u64> {
 	if let Some(config) = catalog.video.renditions.get(name) {
 		return Some(match &config.container {
 			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
+			Container::Loc => 1_000_000,
 			Container::Legacy => guess_video_timescale(config),
 		});
 	}
 	if let Some(config) = catalog.audio.renditions.get(name) {
 		return Some(match &config.container {
 			Container::Cmaf { init, .. } => parse_timescale_from_init(init).ok()?,
+			Container::Loc => 1_000_000,
 			Container::Legacy => config.sample_rate as u64,
 		});
 	}
