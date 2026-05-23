@@ -10,6 +10,7 @@ mod rs
 mod py
 mod kt
 mod swift
+mod go
 
 # Demos and infra.
 mod demo
@@ -73,6 +74,7 @@ ci BASE="":
 		just py    ci "$files"
 		just kt    ci "$files"
 		just swift ci "$files"
+		just go    ci "$files"
 	fi
 
 	# Cheap; always run.
