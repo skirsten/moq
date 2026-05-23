@@ -67,10 +67,14 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
 
 /py/                  # Python packages (uv workspace)
-  moq-net/           # Maturin project: bundles rs/moq-ffi cdylib + uniffi
-                     # bindings as moq_net._uniffi. Published as moq-net on
-                     # PyPI; version tracks rs/moq-ffi (release-py.yml fires
-                     # on moq-ffi-v* tags).
+  moq-rs/            # Maturin project: bundles rs/moq-ffi cdylib + uniffi
+                     # bindings as moq._uniffi. Distribution name is
+                     # moq-rs (PyPI); import name is `moq`. Version tracks
+                     # rs/moq-ffi (release-py.yml fires on moq-ffi-v*
+                     # tags). One umbrella wheel covers every crate
+                     # exposed via moq-ffi because uniffi-linked
+                     # libraries can't be split across separately
+                     # packaged Python wheels.
 
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
