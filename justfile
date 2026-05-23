@@ -13,6 +13,7 @@ mod swift
 
 # Demos and infra.
 mod demo
+mod infra
 
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
