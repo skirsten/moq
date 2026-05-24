@@ -20,6 +20,7 @@ check *args:
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
 	cargo shear
 	cargo sort --workspace --check
+	cargo deny check --show-stats
 
 # Full Rust CI: check + feature edge cases + tests + build. Takes a
 # newline-separated list of changed files; skips if FILES is non-empty
