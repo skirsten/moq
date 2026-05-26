@@ -69,6 +69,15 @@ echo "verify: --- Package.swift ---"
 cat "$STAGED_DIR/Package.swift"
 echo "verify: ---"
 
+# SPM derives a path-based package's identity from the final path
+# component, not from the manifest's `name:` field. Expose the staged
+# dir under the published mirror name so the smoke project's
+# `.product(package:)` reference matches the identity real consumers
+# see when depending on github.com/moq-dev/moq-swift.
+PKG_IDENTITY="moq-swift"
+PKG_LINK="$WORK/$PKG_IDENTITY"
+ln -s "$STAGED_DIR" "$PKG_LINK"
+
 SMOKE="$WORK/smoke"
 mkdir -p "$SMOKE/Sources/Smoke"
 
@@ -80,12 +89,12 @@ let package = Package(
     name: "Smoke",
     platforms: [.iOS(.v15), .macOS(.v12)],
     dependencies: [
-        .package(path: "$STAGED_DIR"),
+        .package(path: "$PKG_LINK"),
     ],
     targets: [
         .executableTarget(
             name: "Smoke",
-            dependencies: [.product(name: "Moq", package: "Moq")],
+            dependencies: [.product(name: "Moq", package: "$PKG_IDENTITY")],
             path: "Sources/Smoke"
         ),
     ]
