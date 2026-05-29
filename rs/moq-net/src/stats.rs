@@ -190,22 +190,93 @@ impl Tier {
 	}
 }
 
-/// Top-level stats aggregator. Cheap to clone (`Arc` inside). One instance per
-/// relay; sessions get tier-scoped handles via [`Stats::tier`].
+/// Settings for a [`Stats`] aggregator. Construct with [`StatsConfig::new`]
+/// (the origin is required) and chain the `with_*` setters (e.g.
+/// `StatsConfig::new(origin).with_prefix(".foo")`), then hand it to
+/// [`Stats::new`].
+///
+/// Distinct from the relay's clap-derived `StatsConfig`, which holds the raw
+/// CLI/TOML knobs and resolves into one of these.
+///
+/// `#[non_exhaustive]` so new knobs can land without breaking call sites; build
+/// via [`StatsConfig::new`] rather than a struct literal.
 #[derive(Clone)]
-pub struct Stats {
-	inner: Arc<StatsInner>,
+#[non_exhaustive]
+pub struct StatsConfig {
+	/// Origin that receives the stats broadcast's `publish_broadcast` calls.
+	pub origin: OriginProducer,
+	/// Top-level path stats are published under (default `.stats`). The full
+	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
+	/// `node` is unset).
+	pub prefix: PathOwned,
+	/// Node suffix that disambiguates broadcasts from different relays sharing a
+	/// cluster origin. Set this on every node in multi-relay deployments. May be
+	/// multi-segment (e.g. `sjc/1`, `sjc/2`) so a region with multiple hosts can
+	/// nest under a shared region key. An empty path is treated as unset.
+	/// Default none.
+	pub node: Option<PathOwned>,
+	/// How long the snapshot task waits between publishes. Default 1s.
+	pub interval: Duration,
+	/// How many intervals an entry lingers in the emitted frame after its last
+	/// observed change, so a short reconnect window doesn't erase it. Default 1.
+	pub retention: u32,
 }
 
-struct StatsInner {
+impl StatsConfig {
+	/// A config publishing on `origin`, with default settings: `.stats` prefix,
+	/// 1s snapshot interval, retention 1, and no node suffix.
+	pub fn new(origin: OriginProducer) -> Self {
+		Self {
+			origin,
+			prefix: PathOwned::from(".stats"),
+			node: None,
+			interval: Duration::from_secs(1),
+			retention: 1,
+		}
+	}
+
+	/// Override the top-level prefix (default `.stats`).
+	pub fn with_prefix(mut self, prefix: impl Into<PathOwned>) -> Self {
+		self.prefix = prefix.into();
+		self
+	}
+
+	/// Override the snapshot interval (default 1s).
+	pub fn with_interval(mut self, interval: Duration) -> Self {
+		self.interval = interval;
+		self
+	}
+
+	/// Override the retention window, in intervals (default 1).
+	pub fn with_retention(mut self, retention: u32) -> Self {
+		self.retention = retention;
+		self
+	}
+
+	/// Set the node suffix (default none). An empty path is treated as unset.
+	pub fn with_node(mut self, node: impl Into<Option<PathOwned>>) -> Self {
+		self.node = node.into();
+		self
+	}
+}
+
+/// Top-level stats aggregator. Cheap to clone (`Arc` inside for the shared
+/// runtime state). One instance per relay; sessions get tier-scoped handles via
+/// [`Stats::tier`]. Build it from a [`StatsConfig`] via [`Stats::new`].
+#[derive(Clone)]
+pub struct Stats {
 	prefix: PathOwned,
-	/// `None` when stats are disabled; otherwise the path the stats broadcast
-	/// is published on. Computed once at construction so the snapshot task
-	/// doesn't have to recompute it per spawn.
-	advertised: Option<PathOwned>,
-	origin: OriginProducer,
+	node: Option<PathOwned>,
 	interval: Duration,
 	retention: u32,
+	enabled: bool,
+	shared: Arc<StatsShared>,
+}
+
+/// Runtime state shared by every clone of a [`Stats`] and held by the
+/// snapshot task through a `Weak`.
+struct StatsShared {
+	origin: OriginProducer,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
 	task: Lock<Option<()>>,
 	/// Monotonic tick counter; `0` is a sentinel meaning "no tick has run yet"
@@ -310,42 +381,28 @@ const TRACK_ORDER: [&str; NUM_SLOTS] = [
 ];
 
 impl Stats {
-	/// Build a new stats aggregator.
-	///
-	/// * `prefix` is the top-level path under which stats are published, e.g.
-	///   `.stats`. The full advertised path is `<prefix>/node/<node>` (or
-	///   `<prefix>/node` when `node` is `None`).
-	/// * `interval` is how long the snapshot task waits between snapshot
-	///   publishes.
-	/// * `retention` is how many intervals an entry lingers in the emitted
-	///   frame after its last observed change, so a short reconnect window
-	///   doesn't erase the entry.
-	/// * `node` disambiguates broadcasts published by different relays into a
-	///   shared cluster origin. Set this on every node in multi-relay
-	///   deployments. The value may be multi-segment (e.g. `sjc/1`, `sjc/2`)
-	///   so a region with multiple hosts can nest under a shared region key.
-	///   `None` (or an empty path after normalization) omits the suffix.
-	/// * `origin` is the [`OriginProducer`] that receives `publish_broadcast`
-	///   for the stats broadcast.
-	pub fn new(
-		prefix: impl Into<PathOwned>,
-		interval: Duration,
-		retention: u32,
-		node: impl Into<Option<PathOwned>>,
-		origin: OriginProducer,
-	) -> Self {
-		let prefix = prefix.into();
+	/// Build a stats aggregator from `config`.
+	pub fn new(config: StatsConfig) -> Self {
+		let StatsConfig {
+			origin,
+			prefix,
+			node,
+			interval,
+			retention,
+		} = config;
 		// An empty path after normalization is indistinguishable from "no node
 		// set"; collapse it so downstream code only sees a single representation.
-		let node = node.into().filter(|p| !p.is_empty());
-		let advertised = Some(advertised_path(&prefix, node.as_ref().map(|p| p.as_str())));
+		// We do this here (not in `with_node`) so a directly-assigned
+		// `config.node` is normalized too.
+		let node = node.filter(|p| !p.is_empty());
 		Self {
-			inner: Arc::new(StatsInner {
-				prefix,
-				advertised,
+			prefix,
+			node,
+			interval,
+			retention,
+			enabled: true,
+			shared: Arc::new(StatsShared {
 				origin,
-				interval,
-				retention,
 				entries: Lock::default(),
 				task: Lock::new(None),
 				tick_counter: AtomicU64::new(0),
@@ -358,12 +415,13 @@ impl Stats {
 	/// can hold a [`Stats`] (or [`StatsHandle`]) unconditionally.
 	pub fn disabled() -> Self {
 		Self {
-			inner: Arc::new(StatsInner {
-				prefix: PathOwned::default(),
-				advertised: None,
+			prefix: PathOwned::default(),
+			node: None,
+			interval: Duration::from_secs(1),
+			retention: 0,
+			enabled: false,
+			shared: Arc::new(StatsShared {
 				origin: Origin::random().produce(),
-				interval: Duration::from_secs(1),
-				retention: 0,
 				entries: Lock::default(),
 				task: Lock::new(None),
 				tick_counter: AtomicU64::new(0),
@@ -373,7 +431,15 @@ impl Stats {
 
 	/// Returns the configured top-level prefix.
 	pub fn prefix(&self) -> &Path<'static> {
-		&self.inner.prefix
+		&self.prefix
+	}
+
+	/// The path the stats broadcast publishes on. Derived from `prefix` +
+	/// `node` on demand; the snapshot task spawns rarely, so recomputing here
+	/// is cheaper than threading it through the shared state. Only meaningful
+	/// when enabled (a disabled aggregator never spawns a task).
+	fn advertised(&self) -> PathOwned {
+		advertised_path(&self.prefix, self.node.as_ref().map(|p| p.as_str()))
 	}
 
 	/// Returns a tier-scoped handle. Bumps through this handle land in the
@@ -386,18 +452,20 @@ impl Stats {
 	}
 
 	fn entry(&self, path: impl AsPath) -> Option<Arc<BroadcastEntry>> {
-		// Disabled aggregator has no advertised broadcast; never allocate state.
-		self.inner.advertised.as_ref()?;
+		// Disabled aggregator never allocates state.
+		if !self.enabled {
+			return None;
+		}
 		let path = path.as_path();
 		// Skip our own stats broadcasts (and any sibling category under the
 		// same prefix) so serving a stats broadcast doesn't generate more
 		// stats.
-		if path.has_prefix(&self.inner.prefix) {
+		if path.has_prefix(&self.prefix) {
 			return None;
 		}
 		let owned = path.to_owned();
 		let arc = {
-			let mut entries = self.inner.entries.lock();
+			let mut entries = self.shared.entries.lock();
 			entries
 				.entry(owned)
 				.or_insert_with(|| Arc::new(BroadcastEntry::new()))
@@ -684,20 +752,19 @@ impl Drop for SubscriberTrack {
 }
 
 fn ensure_task(stats: &Stats) {
-	let inner = &stats.inner;
-	if inner.advertised.is_none() {
+	if !stats.enabled {
 		return;
 	}
-	let mut slot = inner.task.lock();
+	let mut slot = stats.shared.task.lock();
 	if slot.is_none() {
 		*slot = Some(());
-		let weak = Arc::downgrade(inner);
-		spawn(run_publisher(weak));
+		let weak = Arc::downgrade(&stats.shared);
+		spawn(run_publisher(weak, stats.advertised(), stats.interval, stats.retention));
 	}
 }
 
-fn clear_task(inner: &StatsInner) {
-	*inner.task.lock() = None;
+fn clear_task(shared: &StatsShared) {
+	*shared.task.lock() = None;
 }
 
 /// True iff any of the supplied slots had a snapshot change within the
@@ -785,16 +852,10 @@ fn process_slot(
 	}
 }
 
-async fn run_publisher(weak: Weak<StatsInner>) {
-	let Some(inner) = weak.upgrade() else {
+async fn run_publisher(weak: Weak<StatsShared>, advertised: PathOwned, interval: Duration, retention: u32) {
+	let Some(shared) = weak.upgrade() else {
 		return;
 	};
-	let Some(advertised) = inner.advertised.clone() else {
-		clear_task(&inner);
-		return;
-	};
-	let interval = inner.interval;
-	let retention = inner.retention;
 
 	let mut broadcast = Broadcast::new().produce();
 	let mut tracks: Vec<TrackProducer> = Vec::with_capacity(NUM_SLOTS);
@@ -806,17 +867,17 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			Ok(t) => tracks.push(t),
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to create track");
-				clear_task(&inner);
+				clear_task(&shared);
 				return;
 			}
 		}
 	}
-	if !inner.origin.publish_broadcast(&advertised, broadcast.consume()) {
+	if !shared.origin.publish_broadcast(&advertised, broadcast.consume()) {
 		tracing::warn!(advertised = %advertised, "stats: origin rejected stats broadcast");
-		clear_task(&inner);
+		clear_task(&shared);
 		return;
 	}
-	drop(inner);
+	drop(shared);
 
 	// Per-path snapshot state owned by this task. Mirrors entries we've
 	// seen recently; serves both as the diff source for change detection
@@ -831,16 +892,16 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 	loop {
 		ticker.tick().await;
 
-		let Some(inner) = weak.upgrade() else {
+		let Some(shared) = weak.upgrade() else {
 			return;
 		};
 
-		let current_tick = inner.tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
+		let current_tick = shared.tick_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
 		// Clone the current entries map into a Vec so we can drop the
 		// global lock before the change-detection pass.
 		let entries: Vec<(PathOwned, Arc<BroadcastEntry>)> = {
-			let map = inner.entries.lock();
+			let map = shared.entries.lock();
 			map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 		};
 
@@ -863,7 +924,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 		// `strong_count > 1` check a bump racing with GC could land on an
 		// orphaned Arc and be silently lost.
 		{
-			let mut map = inner.entries.lock();
+			let mut map = shared.entries.lock();
 			map.retain(|path, entry| {
 				if Arc::strong_count(entry) > 1 {
 					return true;
@@ -906,7 +967,7 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			*last = json;
 		}
 
-		let map_empty = inner.entries.lock().is_empty();
+		let map_empty = shared.entries.lock().is_empty();
 		if map_empty {
 			empty_ticks = empty_ticks.saturating_add(1);
 			// Once the map has been empty long enough that no consumer could
@@ -915,11 +976,11 @@ async fn run_publisher(weak: Weak<StatsInner>) {
 			// to avoid racing with a fresh insert.
 			let exit_threshold = retention.saturating_mul(2).max(1);
 			if empty_ticks >= exit_threshold {
-				let mut slot = inner.task.lock();
-				if inner.entries.lock().is_empty() {
+				let mut slot = shared.task.lock();
+				if shared.entries.lock().is_empty() {
 					*slot = None;
 					drop(slot);
-					drop(inner);
+					drop(shared);
 					drop(tracks);
 					drop(broadcast);
 					return;
@@ -972,11 +1033,9 @@ mod tests {
 	fn test_stats(node: Option<&str>) -> (Stats, OriginProducer) {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
-			".stats",
-			Duration::from_secs(1),
-			10,
-			node.map(|s| PathOwned::from(s.to_string())),
-			origin.clone(),
+			StatsConfig::new(origin.clone())
+				.with_retention(10)
+				.with_node(node.map(|s| PathOwned::from(s.to_string()))),
 		);
 		(stats, origin)
 	}
@@ -996,22 +1055,18 @@ mod tests {
 	fn new_normalizes_and_drops_empty_node() {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
-			".stats",
-			Duration::from_secs(1),
-			10,
-			Some(PathOwned::from("/sjc//1/".to_string())),
-			origin.clone(),
+			StatsConfig::new(origin.clone())
+				.with_retention(10)
+				.with_node(PathOwned::from("/sjc//1/".to_string())),
 		);
-		assert_eq!(stats.inner.advertised.as_ref().unwrap().as_str(), ".stats/node/sjc/1");
+		assert_eq!(stats.advertised().as_str(), ".stats/node/sjc/1");
 
 		let stats = Stats::new(
-			".stats",
-			Duration::from_secs(1),
-			10,
-			Some(PathOwned::from("///".to_string())),
-			origin,
+			StatsConfig::new(origin)
+				.with_retention(10)
+				.with_node(PathOwned::from("///".to_string())),
 		);
-		assert_eq!(stats.inner.advertised.as_ref().unwrap().as_str(), ".stats/node");
+		assert_eq!(stats.advertised().as_str(), ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1025,7 +1080,7 @@ mod tests {
 		let g2 = bs2.publisher().track("video");
 		g2.bytes(7);
 
-		let entries = stats.inner.entries.lock();
+		let entries = stats.shared.entries.lock();
 		let e1 = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		let e2 = entries.get(&PathOwned::from("demo/ccc")).expect("entry");
 		assert_eq!(e1.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
@@ -1043,7 +1098,7 @@ mod tests {
 		let int_track = int.broadcast("demo/bbb").subscriber().track("audio");
 		int_track.bytes(7);
 
-		let entries = stats.inner.entries.lock();
+		let entries = stats.shared.entries.lock();
 		let entry = entries.get(&PathOwned::from("demo/bbb")).expect("entry");
 		assert_eq!(entry.publisher[Tier::External.idx()].bytes.load(Relaxed), 100);
 		assert_eq!(entry.subscriber[Tier::External.idx()].bytes.load(Relaxed), 0);
@@ -1063,7 +1118,7 @@ mod tests {
 		track.bytes(100);
 		drop(track);
 		drop(p);
-		assert!(stats.inner.entries.lock().is_empty());
+		assert!(stats.shared.entries.lock().is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1076,7 +1131,7 @@ mod tests {
 		track.bytes(100);
 		drop(track);
 		drop(p);
-		assert!(stats.inner.entries.lock().is_empty());
+		assert!(stats.shared.entries.lock().is_empty());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1100,7 +1155,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let origin = Origin::random().produce();
-		let stats = Stats::new(".stats", Duration::from_secs(1), 10, None, origin.clone());
+		let stats = Stats::new(StatsConfig::new(origin.clone()).with_retention(10));
 		let mut consumer = origin.consume();
 
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1137,11 +1192,9 @@ mod tests {
 		// not the tick that observed the open guard.
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
-			".stats",
-			Duration::from_secs(1),
-			2,
-			Some(PathOwned::from("sjc".to_string())),
-			origin,
+			StatsConfig::new(origin)
+				.with_retention(2)
+				.with_node(PathOwned::from("sjc".to_string())),
 		);
 		let key = PathOwned::from("foo/bar".to_string());
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
@@ -1155,25 +1208,25 @@ mod tests {
 		// Tick 2: observe drop. snapshot changes (broadcasts_closed bumps).
 		drive_ticks(1).await;
 		assert!(
-			stats.inner.entries.lock().contains_key(&key),
+			stats.shared.entries.lock().contains_key(&key),
 			"kept on the tick the drop is observed"
 		);
 		// Tick 3: idle tick 1 after change. diff=1<=2, kept.
 		drive_ticks(1).await;
 		assert!(
-			stats.inner.entries.lock().contains_key(&key),
+			stats.shared.entries.lock().contains_key(&key),
 			"kept after 1 idle tick (retention=2)"
 		);
 		// Tick 4: idle tick 2. diff=2<=2, kept.
 		drive_ticks(1).await;
 		assert!(
-			stats.inner.entries.lock().contains_key(&key),
+			stats.shared.entries.lock().contains_key(&key),
 			"kept after 2 idle ticks (retention=2)"
 		);
 		// Tick 5: idle tick 3. diff=3>2, GC'd.
 		drive_ticks(1).await;
 		assert!(
-			!stats.inner.entries.lock().contains_key(&key),
+			!stats.shared.entries.lock().contains_key(&key),
 			"GC'd after 3 idle ticks (retention=2)"
 		);
 	}
@@ -1193,7 +1246,7 @@ mod tests {
 
 		assert!(
 			stats
-				.inner
+				.shared
 				.entries
 				.lock()
 				.contains_key(&PathOwned::from("foo/bar".to_string())),
@@ -1205,11 +1258,9 @@ mod tests {
 	async fn retention_evicts_after_window() {
 		let origin = Origin::random().produce();
 		let stats = Stats::new(
-			".stats",
-			Duration::from_secs(1),
-			2,
-			Some(PathOwned::from("sjc".to_string())),
-			origin,
+			StatsConfig::new(origin)
+				.with_retention(2)
+				.with_node(PathOwned::from("sjc".to_string())),
 		);
 		let bs = stats.tier(Tier::External).broadcast("foo/bar");
 		let track = bs.publisher().track("video");
@@ -1220,7 +1271,7 @@ mod tests {
 		// Far past 2 * retention so the entry is fully aged out.
 		drive_ticks(10).await;
 
-		assert!(stats.inner.entries.lock().is_empty(), "entries should be GC'd");
+		assert!(stats.shared.entries.lock().is_empty(), "entries should be GC'd");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1329,7 +1380,7 @@ mod tests {
 
 		drive_ticks(2).await;
 		{
-			let entries = stats.inner.entries.lock();
+			let entries = stats.shared.entries.lock();
 			let entry = entries.get(&PathOwned::from("foo/bar")).expect("entry");
 			let raw = entry.publisher[Tier::External.idx()].snapshot();
 			assert_eq!(raw.subscriptions, 2, "two track subs");
@@ -1347,7 +1398,7 @@ mod tests {
 		// broadcasts_closed (which lives in task-local state, not on the
 		// global entry) gets bumped to 1, but we can only see that through
 		// the wire frame. Here we just confirm the raw counters squared up.
-		let entries = stats.inner.entries.lock();
+		let entries = stats.shared.entries.lock();
 		let entry = entries
 			.get(&PathOwned::from("foo/bar"))
 			.expect("entry still in retention");
