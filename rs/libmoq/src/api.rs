@@ -116,8 +116,17 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
-/// The callback is called on success (status 0) and later when closed (status non-zero).
-/// The `on_status` callback will NOT be called after [moq_session_close].
+/// The session reconnects automatically with exponential backoff if the connection drops.
+/// Published broadcasts are re-announced and consumers re-subscribed on each reconnect,
+/// since the origins outlive the underlying connection.
+///
+/// The `on_status` callback reports connection state via the sign of the code:
+/// - positive: connected. The value is the connection epoch (1 on the first connect, 2 on the
+///   first reconnect, and so on), so callers can distinguish a reconnect from the initial connect.
+/// - negative: reconnection permanently gave up (the backoff timeout is exceeded). Terminal.
+///
+/// Transient disconnects are not reported. The `on_status` callback will NOT be called after
+/// [moq_session_close].
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
