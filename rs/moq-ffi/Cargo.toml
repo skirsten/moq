@@ -19,6 +19,9 @@ crate-type = ["staticlib", "cdylib"]
 name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
+[features]
+android-logcat = ["moq-native/android-logcat"]
+
 [dependencies]
 bytes = "1"
 hang = { workspace = true }
