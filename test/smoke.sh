@@ -114,9 +114,11 @@ cargo build -q -p moq-relay -p moq-cli
 if needs python; then
     echo "preparing python bindings..."
     # sync the workspace dev group (ruff/maturin/...) from py/, then build the
-    # moq-rs editable wheel (moq-ffi cdylib + uniffi bindings) from py/moq-rs.
+    # moq-ffi editable wheel (cdylib + uniffi bindings) and install the pure
+    # python moq-rs wrapper (import `moq`) that depends on it.
     (cd "$REPO_ROOT/py" && uv sync --no-install-workspace)
-    (cd "$REPO_ROOT/py/moq-rs" && uv run --no-sync maturin develop --uv)
+    (cd "$REPO_ROOT/py/moq-ffi" && uv run --no-sync maturin develop --uv)
+    (cd "$REPO_ROOT/py" && uv pip install --no-deps -e moq-rs)
 fi
 
 if needs js-browser; then
