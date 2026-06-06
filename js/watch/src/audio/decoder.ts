@@ -260,6 +260,7 @@ export class Decoder {
 					timestamp: frame.timestamp,
 				});
 
+				if (decoder.state === "closed") break;
 				decoder.decode(chunk);
 			}
 		});

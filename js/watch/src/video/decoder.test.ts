@@ -137,3 +137,76 @@ test("60fps content on 60Hz vsync paints one frame per tick with no growth", () 
 	expect(created.filter((f) => f.closed).length).toBe(0);
 	expect(queue.length).toBe(0);
 });
+
+// Steady-state simulation: producer at content fps, consumer each vsync
+// with now = wall - latency. Written by Claude.
+function simulate({
+	fps,
+	vsyncHz,
+	latencyMs,
+	durationMs,
+}: {
+	fps: number;
+	vsyncHz: number;
+	latencyMs: number;
+	durationMs: number;
+}) {
+	const FRAME_MS = 1000 / fps;
+	const VSYNC_MS = 1000 / vsyncHz;
+
+	const queue: StubFrame[] = [];
+	const created: StubFrame[] = [];
+	const painted: StubFrame[] = [];
+	let peakDepth = 0;
+
+	let nextProducePts = 0;
+	let nextProduceAt = 0;
+	let nextVsyncAt = 0;
+
+	while (nextProduceAt < durationMs || nextVsyncAt < durationMs) {
+		if (nextProduceAt <= nextVsyncAt) {
+			const f = new StubFrame(us(nextProducePts));
+			queue.push(f);
+			created.push(f);
+			peakDepth = Math.max(peakDepth, queue.length);
+			nextProducePts += FRAME_MS;
+			nextProduceAt += FRAME_MS;
+		} else {
+			const now = (nextVsyncAt - latencyMs) as Time.Milli;
+			if (now >= 0) {
+				const picked = consumeFrame(queue, now);
+				if (picked) painted.push(picked);
+			}
+			nextVsyncAt += VSYNC_MS;
+		}
+	}
+
+	return { queue, created, painted, peakDepth };
+}
+
+test("queue depth scales linearly with configured latency", () => {
+	const fps = 30;
+	const vsyncHz = 60;
+
+	for (const latencyMs of [20, 100, 500, 1000, 5000]) {
+		const { peakDepth } = simulate({ fps, vsyncHz, latencyMs, durationMs: latencyMs + 2000 });
+
+		const expected = Math.ceil((latencyMs * fps) / 1000);
+		expect(peakDepth).toBeGreaterThanOrEqual(expected);
+		expect(peakDepth).toBeLessThanOrEqual(expected + 2);
+	}
+});
+
+test("no produced frames are leaked at 5s latency", () => {
+	const { queue, created, painted } = simulate({
+		fps: 30,
+		vsyncHz: 60,
+		latencyMs: 5000,
+		durationMs: 10000,
+	});
+
+	const closed = created.filter((f) => f.closed).length;
+	expect(painted.length + closed + queue.length).toBe(created.length);
+	expect(painted.length).toBe(created.length - queue.length);
+	expect(closed).toBe(0);
+});
