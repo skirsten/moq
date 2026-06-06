@@ -68,14 +68,20 @@ impl TrackKind {
 #[derive(Debug, Clone)]
 struct TrackDescriptor {
 	kind: TrackKind,
+	/// The moq track name to subscribe to / the GStreamer stream id.
 	name: String,
+	/// A process-unique pad index. Pads are named `video_<id>` / `audio_<id>`
+	/// (matching the `%u` templates) rather than after the track name, so a
+	/// rendition can be torn down and recreated (when its codec/resolution
+	/// changes mid-stream) without two pads ever sharing a name.
+	id: u64,
 }
 
 impl TrackDescriptor {
 	fn pad_name(&self) -> String {
 		match self.kind {
-			TrackKind::Video => format!("video_{}", self.name),
-			TrackKind::Audio => format!("audio_{}", self.name),
+			TrackKind::Video => format!("video_{}", self.id),
+			TrackKind::Audio => format!("audio_{}", self.id),
 		}
 	}
 }
@@ -87,7 +93,6 @@ enum ControlMessage {
 		caps: gst::Caps,
 		reply: oneshot::Sender<PadEndpoint>,
 	},
-	NoMorePads,
 	ReportError(anyhow::Error),
 }
 
@@ -326,9 +331,6 @@ impl MoqSrc {
 					gst::error!(CAT, obj = self.obj(), "failed to create pad: {err:?}");
 				}
 			}
-			ControlMessage::NoMorePads => {
-				self.obj().no_more_pads();
-			}
 			ControlMessage::ReportError(err) => {
 				gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{err:?}"]);
 			}
@@ -403,6 +405,9 @@ impl MoqSrc {
 			PadMessage::Drop => {
 				let _ = pad.set_active(false);
 				let _ = self.obj().remove_pad(pad);
+				// Evict the handle so a long-lived session that keeps swapping
+				// renditions doesn't accumulate dead entries.
+				self.pads.lock().unwrap().remove(pad.name().as_str());
 				false
 			}
 		}
@@ -433,43 +438,202 @@ async fn run_session(
 	};
 
 	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
-	let mut catalog = moq_mux::catalog::hang::Consumer::new(catalog_track);
-	let catalog = catalog.next().await?.context("catalog missing")?.clone();
+	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
 
-	let mut tasks = Vec::new();
+	// Follow the catalog for the whole session and reconcile our pads against every
+	// update, rather than building them once from the first frame. This covers:
+	//   - reactive publishers (the browser via @moq/hang) that announce an empty
+	//     catalog before their encoder configures, then add renditions a beat later;
+	//   - renditions appearing, disappearing, or changing codec/resolution mid-stream.
+	// `Consumer::next` already coalesces to the newest catalog, so we only ever
+	// reconcile against the latest published state.
+	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
+	let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TrackDone>();
+	let mut next_pad_id: u64 = 0;
+	// A detached clone for the pumps, kept separate so the `shutdown.changed()`
+	// branch below can borrow `shutdown` mutably without conflicting with reconcile.
+	let pump_shutdown = shutdown.clone();
 
-	for (track_name, config) in catalog.video.renditions {
-		let descriptor = TrackDescriptor {
-			kind: TrackKind::Video,
-			name: track_name.clone(),
-		};
-		let caps = video_caps(&config)?;
-		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_net::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
-			.with_latency(Duration::from_secs(1));
-		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
+	let mut catalog_closed = false;
+
+	loop {
+		// Done once the catalog is closed and every pump has drained on its own.
+		// Those pumps already emitted EOS downstream via their natural end path.
+		if catalog_closed && active.is_empty() {
+			break;
+		}
+
+		tokio::select! {
+			// Full session shutdown: cancel any pumps still running. (They watch this
+			// same signal too, so this is belt-and-suspenders for a prompt teardown.)
+			_ = shutdown.changed() => {
+				for (_, track) in active.drain() {
+					let _ = track.cancel.send(true);
+				}
+				break;
+			}
+			// A pump ended on its own (track finished or errored). Forget it so a
+			// later catalog update can resubscribe if the rendition reappears -- but
+			// only if it's still the pump we have on file, since a replaced rendition
+			// reuses the name under a fresh id.
+			Some(done) = done_rx.recv() => {
+				if active.get(&done.name).is_some_and(|track| track.id == done.id) {
+					active.remove(&done.name);
+				}
+			}
+			// The guard stops us polling a closed catalog track (which would spin the
+			// loop returning None) while we wait for the pumps to drain.
+			next = catalog_consumer.next(), if !catalog_closed => {
+				match next? {
+					Some(catalog) => {
+						reconcile(
+							&catalog,
+							&mut active,
+							&mut next_pad_id,
+							&broadcast,
+							&control_tx,
+							&done_tx,
+							&pump_shutdown,
+						)
+						.await?;
+						// We deliberately never emit `no_more_pads`: a later catalog can
+						// add renditions at any time, so we can't promise the pad set is
+						// complete. The `Sometimes` pads link on pad-added, and the one
+						// moment we'd truly know there are no more pads -- the catalog
+						// closing -- coincides with the streams ending (EOS) anyway.
+					}
+					// Catalog track closed. Don't cancel the pumps -- let each reach
+					// its natural Ok(None) -> EOS end so downstream sees a clean EOS
+					// rather than a bare pad drop. We just stop reconciling and wait
+					// for the pumps to drain (or for a global shutdown).
+					None => catalog_closed = true,
+				}
+			}
+		}
 	}
 
-	for (track_name, config) in catalog.audio.renditions {
-		let descriptor = TrackDescriptor {
-			kind: TrackKind::Audio,
-			name: track_name.clone(),
-		};
-		let caps = audio_caps(&config)?;
-		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
-		let track_ref = moq_net::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track = moq_mux::container::Consumer::new(track_consumer, moq_mux::catalog::hang::Container::Legacy)
-			.with_latency(Duration::from_secs(1));
-		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
+	Ok(())
+}
+
+/// A track whose pump is currently running, keyed in the session by moq track name.
+struct ActiveTrack {
+	/// Identifies this particular pump, so a stale completion from a replaced
+	/// rendition (same name, older id) doesn't evict its successor.
+	id: u64,
+	/// The negotiated caps; a catalog update that changes them recreates the pad.
+	caps: gst::Caps,
+	/// The wire container; a change (e.g. legacy -> cmaf) also recreates the pad.
+	container: hang::catalog::Container,
+	/// Signals the pump to drop its pad and exit.
+	cancel: watch::Sender<bool>,
+}
+
+/// Posted by a pump when it exits on its own (end of track or error).
+struct TrackDone {
+	name: String,
+	id: u64,
+}
+
+/// Bring the live set of pads in line with `catalog`: spawn pumps for newly
+/// announced renditions, tear down ones that vanished, and recreate any whose
+/// caps or container changed.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile(
+	catalog: &hang::catalog::Catalog,
+	active: &mut HashMap<String, ActiveTrack>,
+	next_pad_id: &mut u64,
+	broadcast: &moq_net::BroadcastConsumer,
+	control_tx: &mpsc::UnboundedSender<ControlMessage>,
+	done_tx: &mpsc::UnboundedSender<TrackDone>,
+	shutdown: &watch::Receiver<bool>,
+) -> Result<()> {
+	struct Desired {
+		kind: TrackKind,
+		caps: gst::Caps,
+		/// The hang container descriptor, kept for change detection against an [`ActiveTrack`].
+		container_hint: hang::catalog::Container,
+		/// The resolved wire container, moved into the pump when we spawn it.
+		container: moq_mux::catalog::hang::Container,
 	}
 
-	let _ = control_tx.send(ControlMessage::NoMorePads);
+	// Resolve caps and the wire container up front. A rendition we can't handle (unsupported
+	// codec, malformed CMAF init) is logged and skipped rather than failing the whole session,
+	// so one bad rendition in a catalog update can't tear down the others we're already serving.
+	let resolve = |kind, caps: Result<gst::Caps>, hint: &hang::catalog::Container| -> Result<Desired> {
+		Ok(Desired {
+			kind,
+			caps: caps?,
+			container: moq_mux::catalog::hang::Container::try_from(hint)?,
+			container_hint: hint.clone(),
+		})
+	};
 
-	for task in tasks {
-		let _ = task.await;
+	let mut desired: HashMap<String, Desired> = HashMap::new();
+	for (name, config) in &catalog.video.renditions {
+		match resolve(TrackKind::Video, video_caps(config), &config.container) {
+			Ok(d) => {
+				desired.insert(name.clone(), d);
+			}
+			Err(err) => gst::warning!(CAT, "ignoring video rendition {name}: {err:?}"),
+		}
+	}
+	for (name, config) in &catalog.audio.renditions {
+		match resolve(TrackKind::Audio, audio_caps(config), &config.container) {
+			Ok(d) => {
+				desired.insert(name.clone(), d);
+			}
+			Err(err) => gst::warning!(CAT, "ignoring audio rendition {name}: {err:?}"),
+		}
+	}
+
+	// Drop anything that disappeared or changed shape; survivors stay put, and the
+	// changed ones get re-added below under a fresh pad id.
+	active.retain(|name, track| match desired.get(name) {
+		Some(d) if d.caps == track.caps && d.container_hint == track.container => true,
+		_ => {
+			let _ = track.cancel.send(true);
+			false
+		}
+	});
+
+	// Add the renditions we aren't already serving.
+	for (name, d) in desired {
+		if active.contains_key(&name) {
+			continue;
+		}
+
+		let id = *next_pad_id;
+		*next_pad_id += 1;
+
+		let descriptor = TrackDescriptor {
+			kind: d.kind,
+			name: name.clone(),
+			id,
+		};
+		let endpoint = request_pad(control_tx, descriptor.clone(), d.caps.clone()).await?;
+
+		let track_consumer = broadcast.subscribe_track(&moq_net::Track::new(&name))?;
+		let track = moq_mux::container::Consumer::new(track_consumer, d.container).with_latency(Duration::from_secs(1));
+
+		let (cancel_tx, cancel_rx) = watch::channel(false);
+		spawn_track_pump(
+			track,
+			descriptor,
+			endpoint,
+			shutdown.clone(),
+			cancel_rx,
+			done_tx.clone(),
+		);
+
+		active.insert(
+			name,
+			ActiveTrack {
+				id,
+				caps: d.caps,
+				container: d.container_hint,
+				cancel: cancel_tx,
+			},
+		);
 	}
 
 	Ok(())
@@ -498,8 +662,10 @@ fn spawn_track_pump(
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	shutdown: watch::Receiver<bool>,
+	cancel: watch::Receiver<bool>,
+	done: mpsc::UnboundedSender<TrackDone>,
 ) -> tokio::task::JoinHandle<()> {
-	RUNTIME.spawn(run_track_pump(track, descriptor, pad_endpoint, shutdown))
+	RUNTIME.spawn(run_track_pump(track, descriptor, pad_endpoint, shutdown, cancel, done))
 }
 
 async fn run_track_pump(
@@ -507,11 +673,19 @@ async fn run_track_pump(
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	mut shutdown: watch::Receiver<bool>,
+	mut cancel: watch::Receiver<bool>,
+	done: mpsc::UnboundedSender<TrackDone>,
 ) {
 	let mut reference_ts = None;
 	loop {
 		tokio::select! {
+			// Whole session going away.
 			_ = shutdown.changed() => {
+				pad_endpoint.send(PadMessage::Drop);
+				break;
+			}
+			// Just this rendition being torn down (dropped or replaced by a catalog update).
+			_ = cancel.changed() => {
 				pad_endpoint.send(PadMessage::Drop);
 				break;
 			}
@@ -569,6 +743,13 @@ async fn run_track_pump(
 			}
 		}
 	}
+
+	// Let the session know this pump is gone so it can resubscribe if the rendition
+	// reappears in a later catalog. Best-effort: the receiver is gone during shutdown.
+	let _ = done.send(TrackDone {
+		name: descriptor.name.clone(),
+		id: descriptor.id,
+	});
 }
 
 fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
