@@ -190,7 +190,12 @@ export class SharedRingBuffer {
 		const buffered = (write - read) | 0;
 		if (latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
+			const before = read;
 			read = casAdvance(this.#control, READ, skipTo);
+			// DECLICK-DEBUG: the worklet dropped audio to hit the latency target.
+			console.log(
+				`[declick-debug][audio-worklet] ring latency-skip: dropped ${(read - before) | 0} samples (buffered=${buffered} latency=${latency})`,
+			);
 		}
 
 		const available = (write - read) | 0;

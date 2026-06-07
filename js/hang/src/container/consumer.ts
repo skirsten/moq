@@ -9,6 +9,8 @@ export interface ConsumerProps {
 	format: Format;
 	// Target latency in milliseconds (default: 0)
 	latency?: Signal<Time.Milli> | Time.Milli;
+	// Optional label for diagnostics (e.g. "audio" / "video").
+	label?: string;
 }
 
 interface Group {
@@ -22,6 +24,7 @@ export class Consumer {
 	#track: Moq.Track;
 	#format: Format;
 	#latency: Signal<Time.Milli>;
+	#label: string;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 
@@ -37,6 +40,7 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = Signal.from(props.latency ?? Moq.Time.Milli.zero);
+		this.#label = props.label ?? "";
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -61,7 +65,7 @@ export class Consumer {
 			}
 
 			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
+				console.warn(`skipping old group [${this.#label}]: ${consumer.sequence} < ${this.#active}`);
 				// Skip old groups.
 				consumer.close();
 				continue;
@@ -177,7 +181,7 @@ export class Consumer {
 			const first = this.#groups.shift();
 			if (!first) break;
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
+			console.warn(`skipping slow group [${this.#label}]: ${first.consumer.sequence} -> ${this.#active}`);
 
 			first.consumer.close();
 			first.frames.length = 0;

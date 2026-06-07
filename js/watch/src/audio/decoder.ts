@@ -159,6 +159,9 @@ export class Decoder {
 
 		const latency = effect.get(this.source.sync.buffer);
 		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
+		// DECLICK-DEBUG: the shared buffer drives the ring's LATENCY slot. A drop here
+		// is what trips the worklet's read() latency-skip (and the consumer group-skip).
+		console.log(`[declick-debug][audio] ring.setLatency=${latencySamples} samples (${latency}ms)`);
 		ring.setLatency(latencySamples);
 	}
 
@@ -195,6 +198,7 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			latency: this.source.sync.buffer,
+			label: "audio",
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -283,6 +287,7 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.source.sync.buffer,
+			label: "audio",
 		});
 		effect.cleanup(() => consumer.close());
 

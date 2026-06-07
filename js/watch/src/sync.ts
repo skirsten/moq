@@ -103,6 +103,8 @@ export class Sync {
 
 		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#buffer.set(buffer);
+		// DECLICK-DEBUG: trace the shared buffer the audio ring/consumer key off.
+		console.log(`[declick-debug][sync] buffer=${buffer}ms jitter=${jitter} video=${video} audio=${audio}`);
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.

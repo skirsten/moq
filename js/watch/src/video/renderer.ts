@@ -74,7 +74,12 @@ export class Renderer {
 		let intersecting = false;
 
 		const update = () => {
-			this.#visible.set(intersecting && !document.hidden);
+			const visible = intersecting && !document.hidden;
+			// DECLICK-DEBUG: tab/visibility flips gate video download but not audio.
+			console.log(
+				`[declick-debug][video] visible=${visible} hidden=${document.hidden} intersecting=${intersecting}`,
+			);
+			this.#visible.set(visible);
 		};
 
 		const observer = new IntersectionObserver(
@@ -102,6 +107,8 @@ export class Renderer {
 		effect.cleanup(() => this.decoder.enabled.set(false));
 
 		if (!paused) {
+			// DECLICK-DEBUG: video download follows visibility (audio keeps running).
+			console.log(`[declick-debug][video] decoder.enabled=${visible}`);
 			this.decoder.enabled.set(visible);
 			return;
 		}
