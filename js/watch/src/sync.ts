@@ -8,6 +8,10 @@ export type Latency = "real-time" | Time.Milli;
 const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
+// A backward media-time jump larger than this is treated as a stream restart
+// (new PTS epoch) rather than reordering, and re-baselines the reference clock.
+const DISCONTINUITY = 1000 as Time.Milli;
+
 export interface SyncProps {
 	latency?: Latency | Signal<Latency>;
 	connection?: Signal<Moq.Connection.Established | undefined>;
@@ -103,7 +107,20 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli, label = ""): void {
-		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
+		const lastMax = this.timestamp.peek();
+
+		// A large backward jump in media time means the publisher restarted with a
+		// fresh PTS epoch. #reference is still pinned to the previous stream, and
+		// since we only ever keep the minimum it would never recover, leaving now()
+		// far ahead of the new frames. Re-baseline so pacing works on the new stream.
+		if (lastMax !== undefined && timestamp < lastMax - DISCONTINUITY) {
+			this.#reference.set(undefined);
+			this.timestamp.set(timestamp);
+			this.#late.clear();
+		} else {
+			this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
+		}
+
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
