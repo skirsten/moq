@@ -13,6 +13,12 @@ import type { Source } from "./source";
 const BUFFERING = 500 as Time.Milli;
 const SWITCH = 100 as Time.Milli;
 
+// Cap on decoded frames + decoder input queue. Each decoded VideoFrame
+// pins a GPU surface, so without a cap this would grow to latency * fps.
+// Backpressuring decoder.decode() pushes the wait upstream into
+// Container.Consumer, where it costs encoded bytes instead. Written by Claude.
+const QUEUE_CAP = 8;
+
 export type DecoderProps = {
 	enabled?: boolean | Signal<boolean>;
 };
@@ -218,6 +224,8 @@ class DecoderTrack {
 	// emits in display order, so push order is already monotonic.
 	#queue: VideoFrame[] = [];
 
+	#queueDrain = Promise.withResolvers<void>();
+
 	signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -350,6 +358,8 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (!(await this.#awaitQueueSpace(effect, decoder))) return;
+				if (decoder.state === "closed") break;
 				decoder.decode(chunk);
 			}
 		});
@@ -424,6 +434,7 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (!(await this.#awaitQueueSpace(effect, decoder))) return;
 				if (decoder.state === "closed") break;
 				decoder.decode(
 					new EncodedVideoChunk({
@@ -474,11 +485,34 @@ class DecoderTrack {
 		const frame = consumeFrame(this.#queue, now);
 		if (!frame) return undefined;
 
+		this.#queueDrain.resolve();
+		this.#queueDrain = Promise.withResolvers<void>();
+
 		const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 		this.timestamp.set(timestamp);
 		this.#trimBuffered(timestamp);
 
 		return frame;
+	}
+
+	// AbortSignal with explicit removal, not Promise.race against
+	// effect.cancel, to avoid leaking a PromiseReaction per iteration onto
+	// the long-lived cancel promise (see #1400). Written by Claude.
+	async #awaitQueueSpace(effect: Effect, decoder: VideoDecoder): Promise<boolean> {
+		const abort = effect.abort;
+		while (this.#queue.length + decoder.decodeQueueSize >= QUEUE_CAP) {
+			if (abort.aborted) return false;
+			const aborted = await new Promise<boolean>((resolve) => {
+				const onAbort = () => resolve(true);
+				abort.addEventListener("abort", onAbort, { once: true });
+				this.#queueDrain.promise.then(() => {
+					abort.removeEventListener("abort", onAbort);
+					resolve(false);
+				});
+			});
+			if (aborted) return false;
+		}
+		return true;
 	}
 
 	close(): void {
