@@ -129,6 +129,7 @@ export class Decoder implements Backend {
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
+			pending.promote();
 			this.#active.set(pending);
 			pending = undefined;
 
@@ -235,6 +236,12 @@ class DecoderTrack {
 
 	#queueDrain = Promise.withResolvers<void>();
 
+	// Whether this track has been promoted to active. A pending track is never
+	// consumed, so while false the output callback drops all but the newest
+	// frame to keep decoding (and `decoded`) racing toward the live edge instead
+	// of stalling at QUEUE_CAP.
+	#promoted = false;
+
 	signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -274,6 +281,15 @@ class DecoderTrack {
 				// Queue for the renderer to pick up on its next vsync.
 				this.#queue.push(frame);
 				this.decoded.set(timestamp);
+
+				// While pending, nothing consumes the queue, so drop everything but
+				// the newest frame and release backpressure. This lets the track
+				// catch up to live before it takes over (e.g. on a rendition switch).
+				if (!this.#promoted) {
+					while (this.#queue.length > 1) this.#queue.shift()?.close();
+					this.#queueDrain.resolve();
+					this.#queueDrain = Promise.withResolvers<void>();
+				}
 			},
 			// TODO bubble up error
 			error: (error) => {
@@ -487,6 +503,12 @@ class DecoderTrack {
 				current.shift();
 			}
 		});
+	}
+
+	// Mark this track as active. After this the output callback stops trimming
+	// the queue so the render buffer can build up normally.
+	promote(): void {
+		this.#promoted = true;
 	}
 
 	// Pop the newest queued frame whose PTS is <= now, closing any older ones.
