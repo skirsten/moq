@@ -116,12 +116,15 @@ export class Decoder implements Backend {
 
 			const active = effect.get(this.#active);
 			if (active) {
-				const pendingTimestamp = effect.get(pending.timestamp);
+				// Compare the pending track's decode frontier against the active
+				// playhead: a pending track is never consumed, so its `timestamp`
+				// stays undefined. `decoded` tracks how far it has buffered.
+				const pendingDecoded = effect.get(pending.decoded);
 				const activeTimestamp = effect.get(active.timestamp);
 
 				// Switch to the new track if it's ready and we've caught up enough.
-				if (!pendingTimestamp) return;
-				if (activeTimestamp && activeTimestamp > pendingTimestamp + SWITCH) return;
+				if (!pendingDecoded) return;
+				if (activeTimestamp && activeTimestamp > pendingDecoded + SWITCH) return;
 			}
 
 			// Upgrade the pending track to active.
@@ -208,7 +211,13 @@ class DecoderTrack {
 	config: RequiredDecoderConfig;
 	stats: Signal<Stats | undefined>;
 
+	// The PTS of the most recently consumed (painted) frame.
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
+
+	// The PTS of the newest decoded frame, set at queue time. Reflects how far a
+	// track has buffered even before it becomes active, so #runPending can decide
+	// when a pending track is ready to take over.
+	decoded = new Signal<Time.Milli | undefined>(undefined);
 
 	// Display dimensions taken from the first decoded frame, used as a fallback
 	// when the catalog doesn't carry display metadata.
@@ -264,6 +273,7 @@ class DecoderTrack {
 
 				// Queue for the renderer to pick up on its next vsync.
 				this.#queue.push(frame);
+				this.decoded.set(timestamp);
 			},
 			// TODO bubble up error
 			error: (error) => {
