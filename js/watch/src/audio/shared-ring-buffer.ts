@@ -54,6 +54,11 @@ function casAdvance(arr: Int32Array, idx: number, candidate: number): number {
 	}
 }
 
+// Length of the linear ramp used to hide sample discontinuities (catch-up
+// skips, overflow, gap fills, underrun). ~3ms is long enough to kill the click
+// without being audible as a fade.
+const DECLICK_SECONDS = 0.003;
+
 export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
@@ -62,6 +67,16 @@ export class SharedRingBuffer {
 
 	#control: Int32Array;
 	#samples: Float32Array[];
+
+	// Apply short ramps around sample discontinuities to suppress clicks. On by
+	// default; tests turn it off to assert raw sample positioning.
+	declick = true;
+
+	// Reader-side declick state. Only the worklet instance calls read(), so this
+	// per-instance state tracks playback continuity across process() calls.
+	#fade: number;
+	#expectedRead?: number; // READ position expected at the start of the next read()
+	#lastSample: Float32Array; // last emitted sample per channel, to ramp from on a jump
 
 	constructor(init: SharedRingBufferInit) {
 		this.channels = init.channels;
@@ -76,6 +91,9 @@ export class SharedRingBuffer {
 				new Float32Array(init.samples, i * this.capacity * Float32Array.BYTES_PER_ELEMENT, this.capacity),
 			);
 		}
+
+		this.#fade = Math.max(1, Math.round(this.rate * DECLICK_SECONDS));
+		this.#lastSample = new Float32Array(this.channels);
 	}
 
 	/**
@@ -114,7 +132,8 @@ export class SharedRingBuffer {
 		// Gap fill: zero-fill from current WRITE to start if there's a discontinuity
 		const write = Atomics.load(this.#control, WRITE);
 		const gap = (start - write) | 0;
-		if (gap > 0) {
+		const hasGap = gap > 0;
+		if (hasGap) {
 			const gapSize = Math.min(gap, this.capacity);
 			for (let channel = 0; channel < this.channels; channel++) {
 				const dst = this.#samples[channel];
@@ -124,12 +143,18 @@ export class SharedRingBuffer {
 			}
 		}
 
-		// Write sample data
+		// Write sample data, ramping the leading edge up out of a gap fill so the
+		// silence->signal edge doesn't click. We only fade samples at or ahead of
+		// WRITE; touching the already-committed [READ, WRITE) window would race the
+		// worklet reader, so the signal->silence edge into the gap is left as-is.
+		const fadeIn = hasGap && this.declick ? Math.min(this.#fade, samples) : 0;
 		for (let channel = 0; channel < this.channels; channel++) {
 			const src = data[channel];
 			const dst = this.#samples[channel];
 			for (let i = 0; i < samples; i++) {
-				dst[slot((start + i) | 0, this.capacity)] = src[offset + i];
+				let sample = src[offset + i];
+				if (i < fadeIn) sample *= (i + 1) / (fadeIn + 1);
+				dst[slot((start + i) | 0, this.capacity)] = sample;
 			}
 		}
 
@@ -150,7 +175,11 @@ export class SharedRingBuffer {
 	 * AudioWorklet only. Returns the number of samples read.
 	 */
 	read(output: Float32Array[]): number {
-		if (Atomics.load(this.#control, STALLED) === 1) return 0;
+		if (Atomics.load(this.#control, STALLED) === 1) {
+			// Continuity is lost while stalled; ramp back in on the next read.
+			this.#expectedRead = undefined;
+			return 0;
+		}
 
 		let read = Atomics.load(this.#control, READ);
 		const write = Atomics.load(this.#control, WRITE);
@@ -165,20 +194,35 @@ export class SharedRingBuffer {
 		}
 
 		const available = (write - read) | 0;
-		const count = Math.min(available, output[0].length);
-		if (count <= 0) return 0;
+		const frames = output[0].length;
+		const count = Math.min(available, frames);
+		if (count <= 0) {
+			this.#expectedRead = undefined; // underrun: ramp back in once data returns
+			return 0;
+		}
 
-		// Copy samples
+		// A non-contiguous read (the latency skip above, or a writer overflow that
+		// advanced READ between calls) jumps the signal: ramp in from the last
+		// emitted sample. An underrun leaves trailing zeros: ramp out into them.
+		const jumped = this.#expectedRead === undefined || ((read - this.#expectedRead) | 0) !== 0;
+		const fadeIn = this.declick && jumped ? Math.min(count, this.#fade) : 0;
+		const fadeOut = this.declick && count < frames ? Math.min(count, this.#fade) : 0;
+
 		for (let channel = 0; channel < this.channels; channel++) {
 			const src = this.#samples[channel];
 			const dst = output[channel];
+			const last = this.#lastSample[channel];
 			for (let i = 0; i < count; i++) {
-				dst[i] = src[slot((read + i) | 0, this.capacity)];
+				let sample = src[slot((read + i) | 0, this.capacity)];
+				if (i < fadeIn) sample = last + (sample - last) * ((i + 1) / (fadeIn + 1));
+				if (fadeOut > 0 && i >= count - fadeOut) sample *= (count - i) / (fadeOut + 1);
+				dst[i] = sample;
 			}
+			this.#lastSample[channel] = fadeOut > 0 ? 0 : dst[count - 1];
 		}
 
 		// Advance READ via CAS so a concurrent writer overflow can't be undone.
-		casAdvance(this.#control, READ, (read + count) | 0);
+		this.#expectedRead = casAdvance(this.#control, READ, (read + count) | 0);
 
 		return count;
 	}
@@ -203,6 +247,7 @@ export class SharedRingBuffer {
 	resize(newCapacity: number): SharedRingBuffer {
 		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
 		const dst = new SharedRingBuffer(init);
+		dst.declick = this.declick;
 
 		const read = Atomics.load(this.#control, READ);
 		const write = Atomics.load(this.#control, WRITE);
