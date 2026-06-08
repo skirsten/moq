@@ -83,16 +83,17 @@ export class Emitter {
 
 			const now = gain.context.currentTime;
 			// Anchor at the current gain, floored above zero so the exponential ramp
-			// is valid even coming out of a full mute, then ramp to the target.
+			// is valid even coming out of a full mute/pause, then ramp to the target.
 			gain.gain.cancelScheduledValues(now);
 			gain.gain.setValueAtTime(Math.max(gain.gain.value, MIN_GAIN), now);
 
-			const volume = effect.get(this.volume);
-			if (volume < MIN_GAIN) {
+			// Pausing fades out like muting; playing fades back in to the volume.
+			const target = effect.get(this.paused) ? 0 : effect.get(this.volume);
+			if (target < MIN_GAIN) {
 				gain.gain.exponentialRampToValueAtTime(MIN_GAIN, now + FADE_TIME);
 				gain.gain.setValueAtTime(0, now + FADE_TIME);
 			} else {
-				gain.gain.exponentialRampToValueAtTime(volume, now + FADE_TIME);
+				gain.gain.exponentialRampToValueAtTime(target, now + FADE_TIME);
 			}
 		});
 	}
