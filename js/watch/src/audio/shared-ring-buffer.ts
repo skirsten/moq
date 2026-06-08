@@ -133,6 +133,10 @@ export class SharedRingBuffer {
 		const write = Atomics.load(this.#control, WRITE);
 		const gap = (start - write) | 0;
 		const hasGap = gap > 0;
+		// RESUME-DEBUG: a large backward gap-fill is the resume discontinuity.
+		if (hasGap && gap > this.#fade) {
+			console.log(`[resume-debug] insert gap-fill: gap=${gap} samples (~${((gap / this.rate) * 1000) | 0}ms)`);
+		}
 		if (hasGap) {
 			const gapSize = Math.min(gap, this.capacity);
 			for (let channel = 0; channel < this.channels; channel++) {
@@ -194,7 +198,12 @@ export class SharedRingBuffer {
 		const buffered = (write - read) | 0;
 		if (latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
+			const before = read;
 			read = casAdvance(this.#control, READ, skipTo);
+			// RESUME-DEBUG: where READ lands on a skip, and how much was dropped.
+			console.log(
+				`[resume-debug] worklet read-skip: dropped=${(read - before) | 0} buffered=${buffered} latency=${latency} nowBehind=${(write - read) | 0}`,
+			);
 		}
 
 		const available = (write - read) | 0;
@@ -211,6 +220,12 @@ export class SharedRingBuffer {
 		const jumped = this.#expectedRead === undefined || ((read - this.#expectedRead) | 0) !== 0;
 		const fadeIn = this.declick && jumped ? Math.min(count, this.#fade) : 0;
 		const fadeOut = this.declick && count < frames ? Math.min(count, this.#fade) : 0;
+		// RESUME-DEBUG: a jump means the played edge gets only this short ramp.
+		if (jumped) {
+			console.log(
+				`[resume-debug] worklet jump-declick: fadeIn=${fadeIn} count=${count} (lastSample=${this.#lastSample[0].toFixed(4)})`,
+			);
+		}
 
 		for (let channel = 0; channel < this.channels; channel++) {
 			const src = this.#samples[channel];

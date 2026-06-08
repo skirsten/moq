@@ -201,6 +201,10 @@ export class Decoder {
 		// Arm the resume fade for the frames this (re)started decoder will emit.
 		this.#fadeTotal = Math.max(1, Math.round(config.sampleRate * RESUME_FADE_SECONDS));
 		this.#fadeRemaining = this.#fadeTotal;
+		// RESUME-DEBUG: proves this build is live and the fade is armed on (re)start.
+		console.log(
+			`[resume-debug] audio decoder (re)start: armed fade=${this.#fadeTotal} samples, primed=${this.#primed}`,
+		);
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
@@ -410,6 +414,10 @@ export class Decoder {
 		if (this.#fadeRemaining <= 0 || channelData.length === 0) return;
 
 		const total = this.#fadeTotal;
+		// RESUME-DEBUG: fires once per resume, at the first faded sample.
+		if (this.#fadeRemaining === total) {
+			console.log(`[resume-debug] applying resume fade over ${total} samples (first emit after restart)`);
+		}
 		const frames = channelData[0].length;
 		for (let i = 0; i < frames && this.#fadeRemaining > 0; i++) {
 			const gain = (total - this.#fadeRemaining + 1) / total;
