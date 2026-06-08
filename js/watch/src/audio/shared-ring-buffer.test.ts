@@ -639,6 +639,29 @@ describe("declick", () => {
 		const out = read(buffer, 20, 1)[0]; // contiguous: no ramp
 		for (let i = 0; i < 20; i++) expect(out[i]).toBe(4.0);
 	});
+
+	it("ramps in from silence after an underrun, not from the stale sample", () => {
+		const buffer = createDeclick(200, 20);
+		insert(buffer, 0, 20, { channels: 1, value: 2.0 }); // exactly latency: unstall, no skip
+
+		// Drain exactly what's buffered. count === frames, so there's no trailing
+		// fade-out; the declick reference is left at the last real sample (2.0).
+		const first = read(buffer, 20, 1)[0];
+		expect(first[19]).toBe(2.0);
+
+		// Nothing buffered: this read underruns. The output is silence, so the
+		// declick reference must reset to 0.
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+
+		// Fresh contiguous audio arrives. The leading edge must ramp up from 0 (the
+		// silence that actually played), not from the stale 2.0 (which would click).
+		insert(buffer, 20, 20, { channels: 1, value: 5.0 });
+		const out = read(buffer, 20, 1)[0];
+		expect(out[0]).toBeCloseTo(1.25, 5); // 5 * 1/4, ramping from 0
+		expect(out[1]).toBeCloseTo(2.5, 5);
+		expect(out[2]).toBeCloseTo(3.75, 5);
+		expect(out[3]).toBe(5.0);
+	});
 });
 
 describe("backlog after a stall", () => {

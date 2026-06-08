@@ -133,10 +133,6 @@ export class SharedRingBuffer {
 		const write = Atomics.load(this.#control, WRITE);
 		const gap = (start - write) | 0;
 		const hasGap = gap > 0;
-		// RESUME-DEBUG: a large backward gap-fill is the resume discontinuity.
-		if (hasGap && gap > this.#fade) {
-			console.log(`[resume-debug] insert gap-fill: gap=${gap} samples (~${((gap / this.rate) * 1000) | 0}ms)`);
-		}
 		if (hasGap) {
 			const gapSize = Math.min(gap, this.capacity);
 			for (let channel = 0; channel < this.channels; channel++) {
@@ -180,8 +176,10 @@ export class SharedRingBuffer {
 	 */
 	read(output: Float32Array[]): number {
 		if (Atomics.load(this.#control, STALLED) === 1) {
-			// Continuity is lost while stalled; ramp back in on the next read.
+			// Output is silence while stalled, so reset the declick reference to 0.
+			// Otherwise the next read ramps from a stale pre-stall sample and clicks.
 			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
 			return 0;
 		}
 
@@ -198,19 +196,17 @@ export class SharedRingBuffer {
 		const buffered = (write - read) | 0;
 		if (latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
-			const before = read;
 			read = casAdvance(this.#control, READ, skipTo);
-			// RESUME-DEBUG: where READ lands on a skip, and how much was dropped.
-			console.log(
-				`[resume-debug] worklet read-skip: dropped=${(read - before) | 0} buffered=${buffered} latency=${latency} nowBehind=${(write - read) | 0}`,
-			);
 		}
 
 		const available = (write - read) | 0;
 		const frames = output[0].length;
 		const count = Math.min(available, frames);
 		if (count <= 0) {
-			this.#expectedRead = undefined; // underrun: ramp back in once data returns
+			// Underrun: output is silence, so reset the declick reference to 0 (same
+			// reason as the stalled case) and ramp back in once data returns.
+			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
 			return 0;
 		}
 
@@ -220,12 +216,6 @@ export class SharedRingBuffer {
 		const jumped = this.#expectedRead === undefined || ((read - this.#expectedRead) | 0) !== 0;
 		const fadeIn = this.declick && jumped ? Math.min(count, this.#fade) : 0;
 		const fadeOut = this.declick && count < frames ? Math.min(count, this.#fade) : 0;
-		// RESUME-DEBUG: a jump means the played edge gets only this short ramp.
-		if (jumped) {
-			console.log(
-				`[resume-debug] worklet jump-declick: fadeIn=${fadeIn} count=${count} (lastSample=${this.#lastSample[0].toFixed(4)})`,
-			);
-		}
 
 		for (let channel = 0; channel < this.channels; channel++) {
 			const src = this.#samples[channel];

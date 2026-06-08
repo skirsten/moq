@@ -66,10 +66,13 @@ export class Emitter {
 			effect.set(this.#gain, gain);
 
 			effect.run((inner) => {
-				// We only connect/disconnect when enabled to save power.
-				// Otherwise the worklet keeps running in the background returning 0s.
-				const enabled = inner.get(this.source.enabled);
-				if (!enabled) return;
+				// Stay connected whenever not paused, even while muted (gain is 0 then,
+				// so it's silent). Disconnecting on mute stops the worklet being pulled,
+				// which freezes its declick reference. The first samples after unmute
+				// would then ramp from a stale value and click. We only disconnect when
+				// fully paused, where playback is stopping anyway.
+				const paused = inner.get(this.paused);
+				if (paused) return;
 
 				gain.connect(root.context.destination); // speakers
 				inner.cleanup(() => gain.disconnect());
