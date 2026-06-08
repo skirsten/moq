@@ -70,24 +70,6 @@ export class Decoder {
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runLatency.bind(this));
 		this.#signals.run(this.#runDecoder.bind(this));
-		this.#signals.run(this.#runResumeFlush.bind(this));
-	}
-
-	#runResumeFlush(effect: Effect): void {
-		const context = effect.get(this.#context);
-		if (!context) return;
-
-		// While suspended (e.g. muted / before the autoplay unlock) the worklet
-		// stops draining but the decoder keeps inserting, filling the ring to
-		// capacity. Flush on resume so we restart from the live edge instead of
-		// replaying up to a second of accumulated audio.
-		let prev = context.state;
-		effect.event(context, "statechange", () => {
-			if (context.state === "running" && prev !== "running") {
-				this.#ring?.flush();
-			}
-			prev = context.state;
-		});
 	}
 
 	#runWorklet(effect: Effect): void {

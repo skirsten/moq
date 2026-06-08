@@ -58,15 +58,6 @@ export class AudioRingBuffer {
 		return this.#buffer[0]?.length;
 	}
 
-	// Drop all buffered audio and re-stall, so playback restarts from the live
-	// edge once the ring refills. Used on resume to avoid replaying audio that
-	// accumulated while the worklet wasn't draining.
-	flush(): void {
-		this.#readIndex = this.#writeIndex;
-		this.#stalled = true;
-		this.#expectedRead = undefined;
-	}
-
 	resize(latency: Time.Milli): void {
 		const newCapacity = Math.ceil(this.rate * Time.Second.fromMilli(latency));
 		if (newCapacity === this.capacity) return;

@@ -660,3 +660,29 @@ describe("flush", () => {
 		for (let i = 0; i < 30; i++) expect(out[i]).toBe(2.0);
 	});
 });
+
+describe("resync", () => {
+	// rate 1000 => resync threshold 500 samples (0.5s) beyond the latency target.
+	it("flushes to live instead of skipping when the backlog is huge", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 2000, latency: 100 });
+		// 1000 buffered vs 100 target => 900 excess, over the 500 resync threshold.
+		insert(buffer, 0, 1000, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
+
+		// The first read detects the backlog and flushes rather than fast-forwarding.
+		expect(read(buffer, 128, 1)[0].length).toBe(0);
+		expect(buffer.stalled).toBe(true);
+		expect(buffer.length).toBe(0);
+	});
+
+	it("skips (not flushes) for a backlog within the resync threshold", () => {
+		const buffer = create({ rate: 1000, channels: 1, capacity: 2000, latency: 100 });
+		// 400 buffered vs 100 target => 300 excess, under the 500 resync threshold.
+		insert(buffer, 0, 400, { channels: 1, value: 1.0 });
+
+		// Trims to the latency target and keeps playing (no flush/stall).
+		const out = read(buffer, 128, 1);
+		expect(out[0].length).toBe(100);
+		expect(buffer.stalled).toBe(false);
+	});
+});

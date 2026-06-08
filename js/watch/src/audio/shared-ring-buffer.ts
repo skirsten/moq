@@ -59,6 +59,12 @@ function casAdvance(arr: Int32Array, idx: number, candidate: number): number {
 // without being audible as a fade.
 const DECLICK_SECONDS = 0.003;
 
+// A backlog this far beyond the latency target means the worklet wasn't draining
+// (e.g. the context was suspended while muted), so we resync to live rather than
+// fast-forward through the accumulated audio. Well above any normal jitter, which
+// the upstream consumer already caps near the latency target.
+const RESYNC_SECONDS = 0.5;
+
 export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
@@ -75,6 +81,7 @@ export class SharedRingBuffer {
 	// Reader-side declick state. Only the worklet instance calls read(), so this
 	// per-instance state tracks playback continuity across process() calls.
 	#fade: number;
+	#resync: number; // backlog (samples beyond latency) that triggers a flush-to-live
 	#expectedRead?: number; // READ position expected at the start of the next read()
 	#lastSample: Float32Array; // last emitted sample per channel, to ramp from on a jump
 
@@ -93,6 +100,7 @@ export class SharedRingBuffer {
 		}
 
 		this.#fade = Math.max(1, Math.round(this.rate * DECLICK_SECONDS));
+		this.#resync = Math.round(this.rate * RESYNC_SECONDS);
 		this.#lastSample = new Float32Array(this.channels);
 	}
 
@@ -188,6 +196,21 @@ export class SharedRingBuffer {
 		// Latency skip: if buffered data exceeds LATENCY, skip ahead.
 		// CAS ensures we never step backward relative to a concurrent writer advance.
 		const buffered = (write - read) | 0;
+
+		// Resync: a backlog far beyond the target means the worklet wasn't draining
+		// (e.g. suspended while muted). Flush and re-stall so playback restarts from
+		// live on refill, rather than fast-forwarding through the accumulated audio
+		// (which plays as a brief blip before catching up). Done here, on the audio
+		// thread, so it lands before any samples are emitted on resume.
+		if (((buffered - latency) | 0) > this.#resync) {
+			this.flush();
+			// DECLICK-DEBUG: resync flush on resume (was the worklet draining?).
+			console.log(
+				`[declick-debug][audio-worklet] resync flush: discarded ${buffered} samples (latency=${latency})`,
+			);
+			return 0;
+		}
+
 		if (latency > 0 && buffered > latency) {
 			const skipTo = (write - latency) | 0;
 			const before = read;
@@ -247,6 +270,7 @@ export class SharedRingBuffer {
 	flush(): void {
 		Atomics.store(this.#control, READ, Atomics.load(this.#control, WRITE));
 		Atomics.store(this.#control, STALLED, 1);
+		this.#expectedRead = undefined;
 	}
 
 	/**
