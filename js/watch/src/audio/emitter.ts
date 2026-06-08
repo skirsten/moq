@@ -60,38 +60,39 @@ export class Emitter {
 			const root = effect.get(this.source.root);
 			if (!root) return;
 
-			const gain = new GainNode(root.context, { gain: effect.get(this.volume) });
+			// Peek so this effect doesn't re-run (recreating the node) on volume
+			// changes. The ramp effect below owns every volume transition, which is
+			// what makes mute/unmute a smooth fade instead of an instant jump to the
+			// new gain.
+			const gain = new GainNode(root.context, { gain: this.volume.peek() });
 			root.connect(gain);
 
+			// Stay connected to the speakers for the node's lifetime, even while muted
+			// or paused. Disconnecting stops the worklet being pulled, which freezes the
+			// ring's declick reference, so resume ramps from a stale sample and clicks.
+			// It's silent regardless: gain is 0 when muted, the ring is empty when paused.
+			gain.connect(root.context.destination);
+			effect.cleanup(() => gain.disconnect());
+
 			effect.set(this.#gain, gain);
-
-			effect.run((inner) => {
-				// Stay connected whenever not paused, even while muted (gain is 0 then,
-				// so it's silent). Disconnecting on mute stops the worklet being pulled,
-				// which freezes its declick reference. The first samples after unmute
-				// would then ramp from a stale value and click. We only disconnect when
-				// fully paused, where playback is stopping anyway.
-				const paused = inner.get(this.paused);
-				if (paused) return;
-
-				gain.connect(root.context.destination); // speakers
-				inner.cleanup(() => gain.disconnect());
-			});
 		});
 
 		this.#signals.run((effect) => {
 			const gain = effect.get(this.#gain);
 			if (!gain) return;
 
-			// Cancel any scheduled transitions on change.
-			effect.cleanup(() => gain.gain.cancelScheduledValues(gain.context.currentTime));
+			const now = gain.context.currentTime;
+			// Anchor at the current gain, floored above zero so the exponential ramp
+			// is valid even coming out of a full mute, then ramp to the target.
+			gain.gain.cancelScheduledValues(now);
+			gain.gain.setValueAtTime(Math.max(gain.gain.value, MIN_GAIN), now);
 
 			const volume = effect.get(this.volume);
 			if (volume < MIN_GAIN) {
-				gain.gain.exponentialRampToValueAtTime(MIN_GAIN, gain.context.currentTime + FADE_TIME);
-				gain.gain.setValueAtTime(0, gain.context.currentTime + FADE_TIME + 0.01);
+				gain.gain.exponentialRampToValueAtTime(MIN_GAIN, now + FADE_TIME);
+				gain.gain.setValueAtTime(0, now + FADE_TIME);
 			} else {
-				gain.gain.exponentialRampToValueAtTime(volume, gain.context.currentTime + FADE_TIME);
+				gain.gain.exponentialRampToValueAtTime(volume, now + FADE_TIME);
 			}
 		});
 	}
