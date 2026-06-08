@@ -162,14 +162,19 @@ export class AudioRingBuffer {
 	read(output: Float32Array[]): number {
 		if (output.length !== this.channels) throw new Error("wrong number of channels");
 		if (this.#stalled) {
+			// Output is silence, so reset the declick reference to 0; otherwise the
+			// next read ramps from a stale pre-stall sample and clicks.
 			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
 			return 0;
 		}
 
 		const frames = output[0].length;
 		const samples = Math.min(this.#writeIndex - this.#readIndex, frames);
 		if (samples === 0) {
+			// Underrun: silence out, same reset as the stalled case.
 			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
 			return 0;
 		}
 
