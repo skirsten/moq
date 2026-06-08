@@ -110,7 +110,7 @@ pub struct WebState {
 	/// The cluster state for resolving origins.
 	pub cluster: Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
-	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::tls::Info>>,
 	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
 	/// Host overload monitor backing the `/health` endpoint.
@@ -228,7 +228,7 @@ async fn build_https_config(
 			.with_single_cert(cert_chain, key_der)
 			.context("invalid https cert/key pair")?
 	} else {
-		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// Build the CA root store inline; `moq_native::tls::Server` is
 		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
 		let mut root_store = rustls::RootCertStore::empty();
 		for path in root {
