@@ -258,8 +258,6 @@ export class Source {
 			const config = available[target.name];
 			effect.set(this.#track, target.name);
 			effect.set(this.#config, config);
-			// DECLICK-DEBUG: manual rendition pin sets the shared sync.video.
-			console.log(`[declick-debug][video] sync.video=${config.jitter} track=${target.name} (manual)`);
 			effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
 			return;
 		}
@@ -290,9 +288,6 @@ export class Source {
 
 		// Use catalog jitter if available, otherwise estimate from framerate.
 		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
-		// DECLICK-DEBUG: ABR re-selection here re-runs on every recvBandwidth change
-		// and rewrites the shared sync.video, which feeds the audio latency target.
-		console.log(`[declick-debug][video] sync.video=${jitter} track=${selected} (auto)`);
 		effect.set(this.sync.video, jitter as Moq.Time.Milli | undefined);
 	}
 

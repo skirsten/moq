@@ -116,8 +116,6 @@ export class Source {
 		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
 		const jitter = codecJitter + overhead;
-		// DECLICK-DEBUG: audio's own contribution to the shared buffer.
-		console.log(`[declick-debug][audio] sync.audio=${jitter} track=${selected.track}`);
 		effect.set(this.sync.audio, jitter as Moq.Time.Milli);
 	}
 

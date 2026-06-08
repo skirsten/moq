@@ -58,6 +58,11 @@ export class Decoder {
 	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
 	#ring: AudioBuffer | undefined;
 
+	// Whether the decoder has been primed once. The first decoder drops a few
+	// warmup frames to settle the codec, but later decoders (re-subscribe after
+	// unmute) must not, or they punch a silent hole into the resumed stream.
+	#primed = false;
+
 	#signals = new Effect();
 
 	constructor(source: Source, props?: DecoderProps) {
@@ -159,9 +164,6 @@ export class Decoder {
 
 		const latency = effect.get(this.source.sync.buffer);
 		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
-		// DECLICK-DEBUG: the shared buffer drives the ring's LATENCY slot. A drop here
-		// is what trips the worklet's read() latency-skip (and the consumer group-skip).
-		console.log(`[declick-debug][audio] ring.setLatency=${latencySamples} samples (${latency}ms)`);
 		ring.setLatency(latencySamples);
 	}
 
@@ -198,7 +200,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			latency: this.source.sync.buffer,
-			label: "audio",
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -217,11 +218,16 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					warmed++;
-					if (warmed <= 3) {
-						// Drop the first 3 frames to prime the decoder.
-						data.close();
-						return;
+					// Only prime (drop the first few frames) on the very first decoder.
+					// On a re-subscribe the stream is already live, so dropping would
+					// leave a silent gap in the resumed audio.
+					if (!this.#primed) {
+						warmed++;
+						if (warmed <= 3) {
+							data.close();
+							return;
+						}
+						this.#primed = true;
 					}
 					this.#emit(data);
 				},
@@ -287,7 +293,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.source.sync.buffer,
-			label: "audio",
 		});
 		effect.cleanup(() => consumer.close());
 

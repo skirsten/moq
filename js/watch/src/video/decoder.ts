@@ -319,7 +319,6 @@ class DecoderTrack {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			latency: this.source.sync.buffer,
-			label: "video",
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -402,7 +401,6 @@ class DecoderTrack {
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
 			latency: this.source.sync.buffer,
-			label: "video",
 		});
 		effect.cleanup(() => consumer.close());
 
