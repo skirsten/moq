@@ -641,48 +641,18 @@ describe("declick", () => {
 	});
 });
 
-describe("flush", () => {
-	it("drops buffered audio, re-stalls, and resumes from the live edge", () => {
-		const buffer = create({ rate: 1000, channels: 1, capacity: 100, latency: 30 });
-		insert(buffer, 0, 50, { channels: 1, value: 1.0 });
-		expect(buffer.stalled).toBe(false);
-
-		buffer.flush();
-		expect(buffer.stalled).toBe(true);
-		expect(buffer.length).toBe(0);
-		// Nothing plays until the ring refills.
-		expect(read(buffer, 10, 1)[0].length).toBe(0);
-
-		// New audio at the live edge refills and resumes; none of the old 1.0 plays.
-		insert(buffer, 50, 30, { channels: 1, value: 2.0 });
-		expect(buffer.stalled).toBe(false);
-		const out = read(buffer, 30, 1)[0];
-		for (let i = 0; i < 30; i++) expect(out[i]).toBe(2.0);
-	});
-});
-
-describe("resync", () => {
-	// rate 1000 => resync threshold 500 samples (0.5s) beyond the latency target.
-	it("flushes to live instead of skipping when the backlog is huge", () => {
+describe("backlog after a stall", () => {
+	it("skips straight to the live edge and keeps playing (no mid-stream silence)", () => {
+		// Simulates resume after the worklet wasn't draining: a huge backlog.
 		const buffer = create({ rate: 1000, channels: 1, capacity: 2000, latency: 100 });
-		// 1000 buffered vs 100 target => 900 excess, over the 500 resync threshold.
 		insert(buffer, 0, 1000, { channels: 1, value: 1.0 });
 		expect(buffer.stalled).toBe(false);
 
-		// The first read detects the backlog and flushes rather than fast-forwarding.
-		expect(read(buffer, 128, 1)[0].length).toBe(0);
-		expect(buffer.stalled).toBe(true);
-		expect(buffer.length).toBe(0);
-	});
-
-	it("skips (not flushes) for a backlog within the resync threshold", () => {
-		const buffer = create({ rate: 1000, channels: 1, capacity: 2000, latency: 100 });
-		// 400 buffered vs 100 target => 300 excess, under the 500 resync threshold.
-		insert(buffer, 0, 400, { channels: 1, value: 1.0 });
-
-		// Trims to the latency target and keeps playing (no flush/stall).
+		// The read trims to the latency target and returns a full quantum of audio,
+		// never stalling: continuous playback a bit behind live, no refill gap.
 		const out = read(buffer, 128, 1);
-		expect(out[0].length).toBe(100);
+		expect(out[0].length).toBe(100); // latency worth remains after the skip
 		expect(buffer.stalled).toBe(false);
+		expect(buffer.length).toBe(0); // consumed the trimmed window, but never re-stalled
 	});
 });
