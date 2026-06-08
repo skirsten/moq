@@ -683,3 +683,22 @@ describe("declick", () => {
 		for (let i = 0; i < 20; i++) expect(out[i]).toBe(4.0);
 	});
 });
+
+describe("flush", () => {
+	it("drops buffered audio, re-stalls, and resumes from the live edge", () => {
+		const buffer = createRing({ rate: 1000, channels: 1, latency: 50 as Time.Milli }); // capacity 50
+		write(buffer, 0 as Time.Milli, 50, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
+
+		buffer.flush();
+		expect(buffer.stalled).toBe(true);
+		expect(buffer.length).toBe(0);
+		expect(read(buffer, 10, 1)[0].length).toBe(0);
+
+		// New audio at the live edge refills and resumes; none of the old 1.0 plays.
+		write(buffer, 50 as Time.Milli, 50, { channels: 1, value: 2.0 });
+		expect(buffer.stalled).toBe(false);
+		const out = read(buffer, 50, 1)[0];
+		for (let i = 0; i < 50; i++) expect(out[i]).toBe(2.0);
+	});
+});

@@ -27,6 +27,9 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "latency") {
 				// Only meaningful in post mode.
 				if (this.#backend instanceof AudioRingBuffer) this.#backend.resize(msg.latency);
+			} else if (msg.type === "flush") {
+				// Only meaningful in post mode; shared mode flushes via the control SAB.
+				if (this.#backend instanceof AudioRingBuffer) this.#backend.flush();
 			}
 		};
 	}

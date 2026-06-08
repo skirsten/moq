@@ -1,6 +1,6 @@
 import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Data, InitPost, InitShared, Latency, State } from "./render";
+import type { Data, Flush, InitPost, InitShared, Latency, State } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
 /**
@@ -21,6 +21,9 @@ export interface AudioBuffer {
 
 	/** Update the target latency in samples. */
 	setLatency(samples: number): void;
+
+	/** Drop buffered audio and restart from the live edge (e.g. on resume). */
+	flush(): void;
 
 	/** Current playback timestamp (derived from reader position). */
 	readonly timestamp: Getter<Time.Micro>;
@@ -113,6 +116,11 @@ class SharedAudioBuffer implements AudioBuffer {
 		}
 	}
 
+	flush(): void {
+		// The worklet shares this ring's control SAB, so the flush is seen immediately.
+		this.#ring.flush();
+	}
+
 	close(): void {
 		this.#signals.close();
 	}
@@ -166,6 +174,11 @@ class PostAudioBuffer implements AudioBuffer {
 	setLatency(samples: number): void {
 		const latency = Time.Milli.fromSecond((samples / this.rate) as Time.Second);
 		const msg: Latency = { type: "latency", latency };
+		this.#worklet.port.postMessage(msg);
+	}
+
+	flush(): void {
+		const msg: Flush = { type: "flush" };
 		this.#worklet.port.postMessage(msg);
 	}
 

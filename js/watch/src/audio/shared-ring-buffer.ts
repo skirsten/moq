@@ -238,6 +238,18 @@ export class SharedRingBuffer {
 	}
 
 	/**
+	 * Drop all buffered audio and re-stall, so playback restarts from the live
+	 * edge once the ring refills to LATENCY. Used on resume (e.g. unmute / context
+	 * resume) so we don't replay the second of audio that accumulated while the
+	 * worklet wasn't draining. Advancing READ to WRITE and setting STALLED is
+	 * enough; the worklet's read() ramps back in via its stall handling.
+	 */
+	flush(): void {
+		Atomics.store(this.#control, READ, Atomics.load(this.#control, WRITE));
+		Atomics.store(this.#control, STALLED, 1);
+	}
+
+	/**
 	 * Allocate a new ring with `newCapacity` samples and copy the unread window
 	 * [READ, WRITE) plus control state into it. Used when growing capacity so
 	 * we don't drop buffered audio. If `newCapacity` is smaller than the unread
