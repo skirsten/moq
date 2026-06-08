@@ -16,6 +16,10 @@ export type DecoderProps = {
 	enabled?: boolean | Signal<boolean>;
 };
 
+// Duration of the fade-in applied at each decoder (re)start to mask the codec
+// settling transient. Roughly one Opus frame.
+const RESUME_FADE_SECONDS = 0.02;
+
 export interface AudioStats {
 	bytesReceived: number;
 }
@@ -62,6 +66,14 @@ export class Decoder {
 	// warmup frames to settle the codec, but later decoders (re-subscribe after
 	// unmute) must not, or they punch a silent hole into the resumed stream.
 	#primed = false;
+
+	// Samples remaining to ramp up at the start of each (re)started decoder. A
+	// freshly recreated decoder produces a settling transient on its first
+	// frames; the gain node's fade can't mask it because it runs at button-press,
+	// not when the network-delayed audio actually arrives. Fading here masks the
+	// transient while keeping the stream contiguous (no gap).
+	#fadeRemaining = 0;
+	#fadeTotal = 0;
 
 	#signals = new Effect();
 
@@ -185,6 +197,10 @@ export class Decoder {
 
 		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
+
+		// Arm the resume fade for the frames this (re)started decoder will emit.
+		this.#fadeTotal = Math.max(1, Math.round(config.sampleRate * RESUME_FADE_SECONDS));
+		this.#fadeRemaining = this.#fadeTotal;
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);
@@ -378,11 +394,30 @@ export class Decoder {
 			channelData.push(data);
 		}
 
+		this.#applyResumeFade(channelData);
+
 		// Hand off to the ring. Shared transport writes directly; post transport
 		// transfers the ArrayBuffers.
 		ring.insert(timestamp, channelData);
 
 		sample.close();
+	}
+
+	// Ramp the first samples after a (re)start up from zero to mask the decoder's
+	// settling transient. Runs across however many frames it takes to cover the
+	// fade, then becomes a no-op until the next restart re-arms it.
+	#applyResumeFade(channelData: Float32Array[]): void {
+		if (this.#fadeRemaining <= 0 || channelData.length === 0) return;
+
+		const total = this.#fadeTotal;
+		const frames = channelData[0].length;
+		for (let i = 0; i < frames && this.#fadeRemaining > 0; i++) {
+			const gain = (total - this.#fadeRemaining + 1) / total;
+			for (const channel of channelData) {
+				channel[i] *= gain;
+			}
+			this.#fadeRemaining--;
+		}
 	}
 
 	#addDecodeBuffered(start: Time.Milli, end: Time.Milli): void {
