@@ -3,7 +3,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 
+use super::hang::{Catalog, CatalogExt, Consumer};
+
 /// Produces both a hang and MSF catalog track for a broadcast.
+///
+/// Generic over the application extension `E` (defaulting to `()` for none). The catalog is a
+/// [`Catalog<E>`](super::hang::Catalog): `video`/`audio` are direct fields (`catalog.video`) and the
+/// extension is reachable directly via deref (`catalog.scte35`) or as `catalog.ext`. Define an
+/// extension with [`CatalogExt`](super::hang::CatalogExt). The MSF track is always derived from the base
+/// media sections, regardless of any extension.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
@@ -12,24 +20,38 @@ use base64::Engine;
 /// The hang track is published through [`moq_json`], which currently emits one snapshot per
 /// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
 /// so deltas can be enabled later without changing the wire format used today.
-#[derive(Clone)]
-pub struct Producer {
-	hang: moq_json::Producer<hang::Catalog>,
+pub struct Producer<E: CatalogExt = ()> {
+	hang: moq_json::Producer<Catalog<E>>,
 	msf_track: moq_net::TrackProducer,
 
-	current: Arc<Mutex<hang::Catalog>>,
+	current: Arc<Mutex<Catalog<E>>>,
 }
 
-impl Producer {
-	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
-	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
-		Self::with_catalog(broadcast, hang::Catalog::default())
+// Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
+impl<E: CatalogExt> Clone for Producer<E> {
+	fn clone(&self) -> Self {
+		Self {
+			hang: self.hang.clone(),
+			msf_track: self.msf_track.clone(),
+			current: self.current.clone(),
+		}
 	}
+}
 
+impl Producer<()> {
+	/// Create a new catalog producer with the default (empty) catalog.
+	///
+	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with a `Catalog<E>`.
+	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
+		Self::with_catalog(broadcast, Catalog::default())
+	}
+}
+
+impl<E: CatalogExt> Producer<E> {
 	/// Create a new catalog producer with the given initial catalog.
 	pub fn with_catalog(
 		broadcast: &mut moq_net::BroadcastProducer,
-		catalog: hang::Catalog,
+		catalog: Catalog<E>,
 	) -> Result<Self, moq_net::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
 		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
@@ -44,7 +66,7 @@ impl Producer {
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
-	pub fn lock(&mut self) -> Guard<'_> {
+	pub fn lock(&mut self) -> Guard<'_, E> {
 		Guard {
 			catalog: self.current.lock().unwrap(),
 			hang: &mut self.hang,
@@ -54,13 +76,13 @@ impl Producer {
 	}
 
 	/// Get a snapshot of the current catalog.
-	pub fn snapshot(&self) -> hang::Catalog {
+	pub fn snapshot(&self) -> Catalog<E> {
 		self.current.lock().unwrap().clone()
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
-		Ok(super::Consumer::new(self.hang.consume()))
+	pub fn consume(&self) -> Result<Consumer<E>, moq_net::Error> {
+		Ok(Consumer::new(self.hang.consume()))
 	}
 
 	/// Finish publishing to this catalog.
@@ -73,43 +95,44 @@ impl Producer {
 
 /// RAII guard for modifying a catalog with automatic publishing on drop.
 ///
-/// Obtained via [`Producer::lock`].
+/// Obtained via [`Producer::lock`]. Derefs to the [`Catalog<E>`](super::hang::Catalog), so `video`/`audio`
+/// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
-pub struct Guard<'a> {
-	catalog: MutexGuard<'a, hang::Catalog>,
-	hang: &'a mut moq_json::Producer<hang::Catalog>,
+pub struct Guard<'a, E: CatalogExt = ()> {
+	catalog: MutexGuard<'a, Catalog<E>>,
+	hang: &'a mut moq_json::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
 
-impl<'a> Deref for Guard<'a> {
-	type Target = hang::Catalog;
+impl<E: CatalogExt> Deref for Guard<'_, E> {
+	type Target = Catalog<E>;
 
 	fn deref(&self) -> &Self::Target {
 		&self.catalog
 	}
 }
 
-impl<'a> DerefMut for Guard<'a> {
+impl<E: CatalogExt> DerefMut for Guard<'_, E> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.updated = true;
 		&mut self.catalog
 	}
 }
 
-impl Drop for Guard<'_> {
+impl<E: CatalogExt> Drop for Guard<'_, E> {
 	fn drop(&mut self) {
 		if !self.updated {
 			return;
 		}
 
 		// Publish the hang catalog (one snapshot per group while deltas are disabled).
-		let catalog: &hang::Catalog = &self.catalog;
+		let catalog: &Catalog<E> = &self.catalog;
 		let _ = self.hang.update(catalog);
 
-		// Publish MSF catalog
-		let msf = to_msf(&self.catalog);
+		// Publish the MSF catalog, derived from the base media sections.
+		let msf = to_msf(&self.catalog.media());
 		if let Ok(mut group) = self.msf_track.append_group() {
 			let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
 			let _ = group.finish();
@@ -251,7 +274,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);
@@ -398,7 +420,6 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
-			..Default::default()
 		};
 
 		let msf = to_msf(&catalog);
