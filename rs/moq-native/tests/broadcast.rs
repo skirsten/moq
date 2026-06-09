@@ -72,7 +72,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -484,7 +484,7 @@ async fn broadcast_websocket() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -591,7 +591,7 @@ async fn broadcast_websocket_fallback() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -691,7 +691,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -767,7 +767,7 @@ async fn broadcast_race_quic_wins() {
 	});
 
 	let client = client.with_consume(sub_origin);
-	let session = tokio::time::timeout(TIMEOUT, client.connect_once(url))
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");

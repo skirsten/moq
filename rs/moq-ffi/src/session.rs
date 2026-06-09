@@ -27,7 +27,7 @@ impl Client {
 		let session = client
 			.with_publish(publish)
 			.with_consume(consume)
-			.connect_once(url)
+			.connect(url)
 			.await
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
