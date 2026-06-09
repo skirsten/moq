@@ -72,7 +72,7 @@ impl Session {
 			.init()?
 			.with_publish(publish)
 			.with_consume(consume)
-			.reconnect(url);
+			.connect(url);
 
 		// report() runs until the reconnect loop gives up; map its terminal error to Connect.
 		Self::report(callback, reconnect)

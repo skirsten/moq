@@ -212,12 +212,20 @@ impl Client {
 		self
 	}
 
-	/// Start a background reconnect loop that connects to the given URL,
-	/// waits for the session to close, then reconnects with exponential backoff.
+	/// Connect to the given URL and stay connected, reconnecting with exponential
+	/// backoff whenever the session drops.
 	///
-	/// Returns a [`Reconnect`] handle; drop the last handle to stop the loop.
-	pub fn reconnect(&self, url: Url) -> Reconnect {
+	/// This starts a background loop and returns a [`Reconnect`] handle immediately;
+	/// drop the last handle to stop the loop. For a single attempt that resolves to a
+	/// [`Session`](moq_net::Session) and does not reconnect, use [`connect_once`](Self::connect_once).
+	pub fn connect(&self, url: Url) -> Reconnect {
 		Reconnect::new(self.clone(), url, self.backoff.clone())
+	}
+
+	/// Deprecated alias for [`connect`](Self::connect), which now reconnects by default.
+	#[deprecated(note = "use `connect`, which now reconnects with backoff by default")]
+	pub fn reconnect(&self, url: Url) -> Reconnect {
+		self.connect(url)
 	}
 
 	#[cfg(not(any(
@@ -227,7 +235,7 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	)))]
-	pub async fn connect(&self, _url: Url) -> crate::Result<moq_net::Session> {
+	pub async fn connect_once(&self, _url: Url) -> crate::Result<moq_net::Session> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature",
 		))
@@ -240,7 +248,11 @@ impl Client {
 		feature = "iroh",
 		feature = "websocket"
 	))]
-	pub async fn connect(&self, url: Url) -> crate::Result<moq_net::Session> {
+	/// Connect to the given URL exactly once, returning the established session.
+	///
+	/// This does not reconnect if the session later drops. For automatic reconnection,
+	/// use [`connect`](Self::connect).
+	pub async fn connect_once(&self, url: Url) -> crate::Result<moq_net::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)

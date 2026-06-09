@@ -235,7 +235,7 @@ async fn run(config: &Config) -> Result<()> {
 	let reconnect = client
 		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
-		.reconnect(config.url.clone());
+		.connect(config.url.clone());
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::catalog::hang::Producer::new(&mut broadcast)?;
