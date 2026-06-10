@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Webcam capture via libavdevice, hardware-preferred H.264 encoding via ffmpeg
+  (`encode::Encoder`), and an `encode::Producer` / `encode::publish_capture`
+  pipeline that publishes through `moq_mux::codec::h264::Import`. Wired into
+  `moq-cli` as the `capture` publish subcommand (behind the `capture` feature).
+- `encode::publish_capture` encodes on demand: the track/catalog are advertised
+  up front but the camera opens only while a subscriber is watching (mirroring
+  `moq-boy`'s `TrackProducer::used()` / `unused()` gating) and is released when idle.
+
 ## [0.0.2](https://github.com/moq-dev/moq/compare/moq-codec-v0.0.1...moq-codec-v0.0.2) - 2026-04-03
 
 ### Other
