@@ -4040,6 +4040,7 @@ dependencies = [
  "web-transport-proto",
  "web-transport-quiche",
  "web-transport-quinn",
+ "web-transport-trait",
 ]
 
 [[package]]
