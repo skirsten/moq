@@ -58,6 +58,50 @@ fn import_resyncs_after_byte_misalignment() {
 	assert_eq!(catalog.audio.renditions.len(), 1, "resync failed: no audio track");
 }
 
+#[test]
+fn resyncs_past_false_sync_byte() {
+	let data = include_bytes!("test_data/bbb.ts");
+	// Lead with a non-sync byte so demux enters resync, then a stray 0x47 (payload-like)
+	// whose byte 188 ahead is not a sync byte. The confirmation must reject that candidate
+	// and scan on to the real stream rather than locking onto it and routing a bogus packet.
+	let mut misaligned = vec![0x00, 0x47];
+	misaligned.resize(202, 0x00);
+	misaligned.extend_from_slice(data);
+	let catalog = import_ts(&misaligned);
+	assert_eq!(catalog.video.renditions.len(), 1, "false sync derailed demux: no video");
+	assert_eq!(catalog.audio.renditions.len(), 1, "false sync derailed demux: no audio");
+}
+
+#[test]
+fn resyncs_across_chunk_boundaries() {
+	// Misaligned start fed in small chunks, so a resync candidate often lands at a buffer
+	// tail and is carried, pending confirmation, into the next decode call. The sync lock
+	// must re-confirm it there (with the trailing bytes) rather than trust it blindly.
+	let data = include_bytes!("test_data/bbb.ts");
+	let mut misaligned = vec![0x00, 0x11, 0x22];
+	misaligned.extend_from_slice(data);
+
+	let mut broadcast = moq_net::Broadcast::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
+	for chunk in misaligned.chunks(100) {
+		import.decode(&mut BytesMut::from(chunk)).unwrap();
+	}
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	assert_eq!(
+		snapshot.video.renditions.len(),
+		1,
+		"chunked resync failed: no video track"
+	);
+	assert_eq!(
+		snapshot.audio.renditions.len(),
+		1,
+		"chunked resync failed: no audio track"
+	);
+}
+
 #[tokio::test(start_paused = true)]
 async fn import_export_import_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
