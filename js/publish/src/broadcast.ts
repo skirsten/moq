@@ -1,9 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
-import { Producer } from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import type { CatalogProducer } from "./catalog";
 import * as Video from "./video";
 
 export type BroadcastProps = {
@@ -29,9 +27,9 @@ export class Broadcast {
 
 	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
 	// `video`/`audio` sections are kept in sync from the encoders; an application adds its own root
-	// sections (e.g. `scte35`) by mutating it too.
-	// Deltas are disabled for now (`deltaRatio: 0`) to stay byte-compatible with consumers that only read snapshots.
-	readonly catalog: CatalogProducer = new Producer<Catalog.Root>({ initial: {}, deltaRatio: 0 });
+	// sections (e.g. `scte35`) by mutating it too. Catalog.Producer pins deltas off (one snapshot per
+	// group) to stay byte-compatible with consumers that only read snapshots.
+	readonly catalog: Catalog.Producer = new Catalog.Producer();
 
 	// Handlers for custom tracks registered via `publishTrack`, keyed by track name. Persists across
 	// reconnects so a new `Moq.Broadcast` still serves them.
