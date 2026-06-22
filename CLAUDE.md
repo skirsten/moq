@@ -39,64 +39,29 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 ## Project Structure
 
-```
-/rs/                  # Rust crates
-  moq-net/           # Core networking layer (published as moq-net; negotiates moq-lite or moq-transport)
-  moq-native/        # QUIC/WebTransport connection helpers for native apps; clock example lives in examples/clock.rs
-  moq-relay/         # Clusterable relay server (binary: moq-relay)
-  moq-token/         # JWT authentication library
-  moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
-  moq-cli/           # CLI tool for media operations (binary: moq)
-  moq-bench/         # Load generator for benchmarking relays (binary: moq-bench)
-  moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
-  moq-audio/         # Native PCM ↔ Opus encode/decode on top of moq-mux
-  hang/              # Media encoding/streaming (catalog/container format)
-  libmoq/            # C bindings (staticlib)
-  moq-ffi/           # UniFFI bindings for Python/Swift/Kotlin (cdylib + staticlib)
-  moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
-  moq-gst/           # GStreamer plugin (moqsink/moqsrc elements)
+Top-level layout only. Per-crate and per-package detail lives in the nested guides (see [Per-Directory Guides](#per-directory-guides)), which sit next to the code and don't rot here.
 
-/js/                  # TypeScript/JavaScript packages
-  net/               # Core networking layer for browsers (published as @moq/net)
-  signals/           # Reactive signals library (published as @moq/signals)
-  token/             # JWT token generation (published as @moq/token)
-  clock/             # Clock example (published as @moq/clock)
-  hang/              # Core media layer: catalog, container, support (published as @moq/hang)
-  watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
-  publish/           # Publish media to streams + UI (published as @moq/publish)
-  moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
+- `/rs/` - Rust crates: core networking (`moq-net`), native helpers, the relay, CLIs, media muxing/codecs, and the FFI/C bindings. See `rs/CLAUDE.md`.
+- `/js/` - TypeScript/JavaScript packages for the browser, published as `@moq/*`. See `js/CLAUDE.md`.
+- `/py/`, `/swift/`, `/kt/`, `/go/` - language wrappers over `rs/moq-ffi` (see [Language Bindings](#language-bindings)). `/py/` has `py/CLAUDE.md`; the others defer to their `README.md`.
+- `/demo/` - demos and test media: relay configs, the web demo, MoQ Boy, media hosting, and a network throttle script.
+- `/doc/` - documentation site (VitePress, deployed via Cloudflare).
 
-/py/                  # Python packages (uv workspace)
-  moq-ffi/           # Maturin project: rs/moq-ffi cdylib + uniffi bindings.
-                     # Distribution `moq-ffi` (PyPI); import `moq_ffi`. One
-                     # wheel covers every crate exposed via moq-ffi because
-                     # uniffi-linked libraries can't be split across separate
-                     # wheels. Version tracks rs/moq-ffi (release-py-ffi.yml
-                     # fires on moq-ffi-v* tags). Most callers want `moq-rs`.
-  moq-rs/            # Pure-python ergonomic wrapper. Distribution `moq-rs`
-                     # (PyPI, since `moq` is taken); import `moq`. Depends on
-                     # moq-ffi via a compatible-release pin (~=0.2.x) so it
-                     # floats to the latest moq-ffi patch. Versioned
-                     # independently: bump py/moq-rs/pyproject.toml by hand; on
-                     # merge to main release-py.yml publishes to PyPI if that
-                     # version isn't already there (registry is the gate).
+## Language Bindings
 
-/swift/               # Swift wrapper over rs/moq-ffi (SwiftPM)
-/kt/                  # Kotlin wrapper over rs/moq-ffi (Gradle, KMP)
-/go/                  # Go wrapper over rs/moq-ffi (uniffi-bindgen-go)
-                      # swift/kt/go are in-tree source skeletons.
-                      # CI mirrors them to moq-dev/moq-{swift,kotlin,go}
-                      # on each moq-ffi-v* tag.
+`rs/moq-ffi` is the single UniFFI core that every non-Rust binding is generated from. The wrappers under `/py`, `/swift`, `/kt`, and `/go` are thin layers over it, and `rs/libmoq` exposes the same core as a C staticlib. So one `moq-ffi` change ripples out to all of them (and their docs) per the [Cross-Package Sync](#cross-package-sync) table. CI mirrors the `swift`/`kt`/`go` source skeletons to `moq-dev/moq-{swift,kotlin,go}` on each `moq-ffi-v*` tag. For Python, most callers want the ergonomic `moq-rs` wrapper rather than the generated `moq-ffi` bindings directly.
 
-/demo/                # Demos and test media
-  boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
-  relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
-  pub/               # Media hosting (vid.moq.dev)
-  web/               # Web demo (watch/publish examples)
-  throttle/          # Network throttle script for testing
+## Per-Directory Guides
 
-/doc/                 # Documentation site (VitePress, deployed via Cloudflare)
-```
+Language-specific conventions, crate/package maps, and patterns live in nested `CLAUDE.md` files that load automatically when you work under that directory. Before writing code in one of these areas, read its guide (your editor loads it for you, but check it explicitly if you are reasoning about the area without opening a file in it):
+
+- **`rs/CLAUDE.md`** - Rust workspace: crate map, Producer/Consumer model, `poll_*` plumbing, error handling, config/TOML merge, Version matching, testing.
+- **`js/CLAUDE.md`** - TypeScript/JS workspace: package map, the signals + Effect reactivity model and its lifecycle rules, Web Components UI, `bun`/Biome tooling.
+- **`py/CLAUDE.md`** - Python wrappers: the `moq-ffi` (generated bindings) vs `moq-rs` (ergonomic) split and the `moq` public surface.
+
+The `swift/`, `kt/`, and `go/` directories are thin wrappers over `rs/moq-ffi` (mirrored to external repos); see each directory's `README.md` rather than a dedicated guide.
+
+This root file holds only cross-cutting rules that apply everywhere (writing style, branch targeting, cross-package sync, public-API scrutiny, comment/doc conventions).
 
 ## Dependencies
 
@@ -110,29 +75,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
 4. Consult `doc/` for documentation and the [IETF datatracker](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for specification drafts when working on protocol-level code
 
-## Version Matching Convention
-
-When matching on `Version` enums, default to the **newest** draft behavior so future versions default forward. Explicitly list older versions:
-
-```rust
-// CORRECT: future versions get draft-17+ behavior
-match version {
-    Version::Draft14 | Version::Draft15 | Version::Draft16 => { /* old behavior */ }
-    _ => { /* newest/draft-17 behavior */ }
-}
-```
-
 ## Writing Style
 
 - **No em dashes (—)** in code, comments, doc comments, commit messages, or any prose. Use a period and start a new sentence, or use a comma/parenthesis if the clauses are tightly bound.
-
-## Rust Conventions
-
-- **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
-- Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
-- **Config flags + TOML merge**: For any `#[arg]` field on a TOML-loadable config, use `Option<T>` (not bare `bool` / `String` / etc.). The TOML→CLI merge clobbers bare fields with their `Default` when the flag is absent, silently overwriting TOML values. See `rs/moq-relay/src/config.rs::tests` for the regression test; add one for any new flag.
-- **Prefer `if let` / `let ... else` over an unwrapping `match`**: a `match` whose only job is to unwrap (`Ok(v) => v` / `Some(v) => v`) reads cleaner as `if let Some(v) = x { ... }` or `let Some(v) = x else { ... };`. Matching on an `Option`/`Result` just to bind the inner value is the tell. Keep `match` when both arms do real work or you need the `Err` / `None` payload.
-- **`poll_*` plumbing**: a `Poll::Pending => Poll::Pending` arm usually means `ready!(...)` will collapse the match. And `.map_err(Into::into)` on a fallible result is usually better as `Ok(x?)` (the `?` does the `From` conversion). These compose: `let v = ready!(inner.poll_next(cx))?;` in a `fn -> Poll<Result<...>>` both unwraps the `Poll` and converts the error.
 
 ## Comment Conventions
 
@@ -163,15 +108,12 @@ This applies whenever you add or widen a `pub` item, especially in library crate
 
 ## Tooling
 
-- **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
+Language-specific tooling (TypeScript/`bun`/Biome, JS async patterns, Web Components UI, Rust/`cargo`) lives in the per-directory guides. See [Per-Directory Guides](#per-directory-guides).
+
 - **Common**: Use `just` for common development tasks
-- **Rust**: Use `cargo` for Rust-specific operations
-- **Formatting/Linting**: Biome for JS/TS formatting and linting
-- **UI**: Plain Web Components in `@moq/watch/ui` and `@moq/publish/ui`, built directly on `@moq/signals`
 - **Builds**: Nix flake for reproducible builds (optional)
 - **Local-first**: When work can live in a `just` recipe (invoked via `nix develop --command`) or as logic in a GitHub Actions workflow step, prefer the recipe. The same code then runs reproducibly on a developer machine and in CI, and is debuggable locally without pushing commits. Workflow YAML should mostly delegate to `just`; reach for plugins (`dorny/paths-filter`, custom actions, etc.) only when a recipe genuinely can't express the logic.
 - **CI**: Prefer building release artifacts inside Nix (`nix build .#pkg`) over relying on runner-provided toolchains and `apt`/`brew` packages. Pinning the build environment in `flake.lock` makes artifacts deterministic and decouples them from drift in GitHub Actions runner images. Reach for the runner-native toolchain only when Nix doesn't fit (e.g. Windows runners).
-- **JS async patterns**: Use `Effect.interval()`, `Effect.timer()`, and `Effect.event()` helpers from `@moq/signals` instead of raw `setInterval`, `setTimeout`, `addEventListener`. These handle cleanup automatically when the Effect is closed.
 
 ## Testing Approach
 
@@ -225,7 +167,7 @@ When making changes to the codebase:
 
 ## PR Reviews
 
-CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review, run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill.
+CodeRabbit reviews PRs automatically, but it has an hourly quota and runs out of org credits. If a PR shows a "Review limit reached" / "out of usage credits" message instead of an actual review (or CodeRabbit otherwise fails to produce one), run the `/review` skill locally against the PR to get review feedback without waiting for the quota to refill. Then act on the findings the same way you would CodeRabbit's: push the high-confidence, unambiguous fixes directly, and escalate anything ambiguous, architectural, or open to interpretation by asking first rather than guessing.
 
 When reviewing a PR, always include a list of the public API changes (new/renamed/removed/signature-changed `pub` items in `rs/moq-*` and `js/*`), and call out anything that is breaking per [Branch Targeting](#branch-targeting). Distinguish genuinely public surface from `pub(crate)` / private items so the breaking-change and branch-targeting rules are applied to the right things.
 
