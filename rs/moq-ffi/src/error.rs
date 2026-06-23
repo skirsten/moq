@@ -48,6 +48,10 @@ pub enum MoqError {
 	#[error("codec: {0}")]
 	Codec(String),
 
+	/// Failed to parse a JSON value, e.g. an invalid catalog section payload.
+	#[error("json: {0}")]
+	Json(String),
+
 	#[error("invalid error code: {0}")]
 	InvalidErrorCode(i32),
 
