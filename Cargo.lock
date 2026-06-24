@@ -3849,6 +3849,7 @@ name = "moq-json"
 version = "0.0.4"
 dependencies = [
  "bytes",
+ "flate2",
  "json-patch",
  "kio",
  "moq-net",
