@@ -36,7 +36,7 @@ pub enum Error {
 	EmptyRoots(PathBuf),
 
 	#[error(
-		"no trusted roots: provide --tls-root, enable --tls-system-roots, or use --tls-fingerprint / --tls-disable-verify"
+		"no trusted roots: provide --client-tls-root, enable --client-tls-system-roots, or use --client-tls-fingerprint / --client-tls-disable-verify"
 	)]
 	NoRoots,
 
@@ -47,7 +47,7 @@ pub enum Error {
 	FingerprintLength(usize),
 
 	#[error(
-		"--tls-fingerprint cannot be combined with --tls-root or --tls-system-roots: fingerprint pinning bypasses CA verification"
+		"--client-tls-fingerprint cannot be combined with --client-tls-root or --client-tls-system-roots: fingerprint pinning bypasses CA verification"
 	)]
 	FingerprintWithRoots,
 
@@ -113,23 +113,23 @@ pub struct Client {
 	///
 	/// These roots are added on top of the system roots. By default the system
 	/// roots are only loaded when no custom root is given, so passing a root
-	/// replaces them; set `--tls-system-roots` to trust both (e.g. to reach a
+	/// replaces them; set `--client-tls-system-roots` to trust both (e.g. to reach a
 	/// local relay with a private CA and a remote one with a public CA).
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[arg(id = "client-tls-root", long = "client-tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// Also trust the platform's native root certificates.
 	///
-	/// Defaults to enabled only when no `--tls-root` is given. Set it explicitly
-	/// to trust the system roots alongside any custom roots, or set it to false
-	/// to trust only the custom roots. Trusting neither (no custom root and
-	/// system roots disabled) is rejected, since verification could never pass.
+	/// Defaults to enabled only when no `--client-tls-root` is given. Set it
+	/// explicitly to trust the system roots alongside any custom roots, or set it
+	/// to false to trust only the custom roots. Trusting neither (no custom root
+	/// and system roots disabled) is rejected, since verification could never pass.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "tls-system-roots",
-		long = "tls-system-roots",
+		id = "client-tls-system-roots",
+		long = "client-tls-system-roots",
 		env = "MOQ_CLIENT_TLS_SYSTEM_ROOTS",
 		default_missing_value = "true",
 		num_args = 0..=1,
@@ -149,7 +149,11 @@ pub struct Client {
 	/// This value can be provided multiple times to accept any of several fingerprints (e.g.
 	/// across a certificate rotation). In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "tls-fingerprint", long = "tls-fingerprint", env = "MOQ_CLIENT_TLS_FINGERPRINT")]
+	#[arg(
+		id = "client-tls-fingerprint",
+		long = "client-tls-fingerprint",
+		env = "MOQ_CLIENT_TLS_FINGERPRINT"
+	)]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub fingerprint: Vec<String>,
 
@@ -174,8 +178,8 @@ pub struct Client {
 	/// Fine for local development and between relays, but should be used in caution in production.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
-		id = "tls-disable-verify",
-		long = "tls-disable-verify",
+		id = "client-tls-disable-verify",
+		long = "client-tls-disable-verify",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		default_missing_value = "true",
 		num_args = 0..=1,
@@ -183,6 +187,46 @@ pub struct Client {
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
+
+	/// Deprecated `--tls-*` spellings, folded into the canonical fields above with
+	/// a warning. Private and hidden so they stay off the public surface; not a
+	/// TOML field (config files use the canonical names).
+	#[command(flatten)]
+	#[serde(skip)]
+	deprecated: Deprecated,
+}
+
+/// Holds the deprecated bare `--tls-*` flag spellings (renamed to `--client-tls-*`).
+/// Flattened into [`Client`] so they keep parsing; folded into the canonical
+/// fields by [`Client::build`] with a deprecation warning. No env (the env names
+/// were never renamed) and no TOML.
+#[derive(Clone, Default, Debug, clap::Args)]
+struct Deprecated {
+	#[arg(long = "tls-root", hide = true)]
+	root: Vec<PathBuf>,
+
+	#[arg(
+		long = "tls-system-roots",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	system_roots: Option<bool>,
+
+	#[arg(long = "tls-fingerprint", hide = true)]
+	fingerprint: Vec<String>,
+
+	#[arg(
+		long = "tls-disable-verify",
+		hide = true,
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	disable_verify: Option<bool>,
 }
 
 /// The resolved server-certificate verification policy.
@@ -193,7 +237,7 @@ pub struct Client {
 /// are valid.
 #[derive(Clone)]
 pub(crate) enum Verification {
-	/// No verification at all. Insecure; only via `--tls-disable-verify`.
+	/// No verification at all. Insecure; only via `--client-tls-disable-verify`.
 	Disabled,
 
 	/// Pin the leaf certificate by SHA-256. The CA chain is not consulted, so
@@ -206,32 +250,76 @@ pub(crate) enum Verification {
 }
 
 impl Client {
+	/// Log a warning for each deprecated `--tls-*` flag in use. Called once from
+	/// [`Self::verification`], which every backend runs, so a deprecated flag warns once.
+	pub(crate) fn warn_deprecated(&self) {
+		if !self.deprecated.root.is_empty() {
+			tracing::warn!("--tls-root is deprecated; use --client-tls-root");
+		}
+		if self.deprecated.system_roots.is_some() {
+			tracing::warn!("--tls-system-roots is deprecated; use --client-tls-system-roots");
+		}
+		if !self.deprecated.fingerprint.is_empty() {
+			tracing::warn!("--tls-fingerprint is deprecated; use --client-tls-fingerprint");
+		}
+		if self.deprecated.disable_verify.is_some() {
+			tracing::warn!("--tls-disable-verify is deprecated; use --client-tls-disable-verify");
+		}
+	}
+
+	/// Roots from the canonical field plus the deprecated `--tls-root` spelling.
+	pub(crate) fn effective_root(&self) -> Vec<PathBuf> {
+		let mut root = self.root.clone();
+		root.extend(self.deprecated.root.iter().cloned());
+		root
+	}
+
+	/// Fingerprints from the canonical field plus the deprecated `--tls-fingerprint`.
+	pub(crate) fn effective_fingerprint(&self) -> Vec<String> {
+		let mut fp = self.fingerprint.clone();
+		fp.extend(self.deprecated.fingerprint.iter().cloned());
+		fp
+	}
+
+	/// `system_roots`, preferring the canonical flag over the deprecated alias.
+	pub(crate) fn effective_system_roots(&self) -> Option<bool> {
+		self.system_roots.or(self.deprecated.system_roots)
+	}
+
+	/// `disable_verify`, preferring the canonical flag over the deprecated alias.
+	pub(crate) fn effective_disable_verify(&self) -> Option<bool> {
+		self.disable_verify.or(self.deprecated.disable_verify)
+	}
+
 	/// Resolve the verification policy from the configured flags.
 	///
 	/// Precedence and rules (shared by all backends):
-	/// - `--tls-disable-verify` wins and disables verification.
-	/// - `--tls-fingerprint` pins the leaf and bypasses the CA chain; combining
-	///   it with `--tls-root` or `--tls-system-roots` is rejected rather than
+	/// - `--client-tls-disable-verify` wins and disables verification.
+	/// - `--client-tls-fingerprint` pins the leaf and bypasses the CA chain; combining
+	///   it with `--client-tls-root` or `--client-tls-system-roots` is rejected rather than
 	///   silently ignoring one of them.
 	/// - Otherwise, verify against the system roots (default) plus any custom
 	///   roots. The system roots are dropped once a custom root is given unless
-	///   `--tls-system-roots` re-enables them.
+	///   `--client-tls-system-roots` re-enables them.
 	pub(crate) fn verification(&self) -> Result<Verification> {
-		if self.disable_verify.unwrap_or_default() {
+		self.warn_deprecated();
+
+		if self.effective_disable_verify().unwrap_or_default() {
 			return Ok(Verification::Disabled);
 		}
 
 		let fingerprints = self.fingerprints()?;
 		if !fingerprints.is_empty() {
-			if !self.root.is_empty() || self.system_roots == Some(true) {
+			if !self.effective_root().is_empty() || self.effective_system_roots() == Some(true) {
 				return Err(Error::FingerprintWithRoots);
 			}
 			return Ok(Verification::Fingerprints(fingerprints));
 		}
 
+		let root = self.effective_root();
 		// Default to system roots only when no custom root is given, so passing a
 		// root replaces them unless the system roots are explicitly re-enabled.
-		let system_roots = self.system_roots.unwrap_or(self.root.is_empty());
+		let system_roots = self.effective_system_roots().unwrap_or(root.is_empty());
 
 		let mut roots = Vec::new();
 		if system_roots {
@@ -241,7 +329,7 @@ impl Client {
 			}
 			roots.extend(native.certs);
 		}
-		for root in &self.root {
+		for root in &root {
 			let certs = read_certs(root)?;
 			if certs.is_empty() {
 				return Err(Error::EmptyRoots(root.clone()));
@@ -262,17 +350,17 @@ impl Client {
 	/// honored for a connection.
 	///
 	/// Only when no stronger verification is configured: an explicit
-	/// `--tls-fingerprint` must never be weakened by an attacker-controlled
+	/// `--client-tls-fingerprint` must never be weakened by an attacker-controlled
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
-		self.fingerprint.is_empty() && !self.disable_verify.unwrap_or_default()
+		self.effective_fingerprint().is_empty() && !self.effective_disable_verify().unwrap_or_default()
 	}
 
 	/// Parse the configured fingerprints into fixed-size SHA-256 digests.
 	fn fingerprints(&self) -> Result<Vec<[u8; 32]>> {
-		self.fingerprint
+		self.effective_fingerprint()
 			.iter()
 			.map(|fp| {
 				let bytes = hex::decode(fp.trim()).map_err(Error::Fingerprint)?;

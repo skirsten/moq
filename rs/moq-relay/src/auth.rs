@@ -166,40 +166,34 @@ impl axum::response::IntoResponse for AuthError {
 	}
 }
 
-/// TLS configuration for HTTP requests made by the auth client (JWK fetches
-/// and public-API lookups).
-///
-/// Mirrors [`moq_native::tls::Client`] so the auth client can be configured
-/// independently of the cluster client. Defaults to system roots with no
-/// client identity, which is what most external auth endpoints expect.
+/// Deprecated `--auth-tls-*` overrides, kept for backwards compatibility. The
+/// auth client otherwise reuses the cluster client's `--client-tls-*` config.
+/// Hidden from `--help`; setting any field logs a deprecation warning.
+#[doc(hidden)]
 #[serde_as]
 #[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
-	/// PEM file(s) of root CAs. If empty, the platform's native roots are used.
-	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
-	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
+	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT", hide = true)]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
-	/// PEM file containing the client certificate chain for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT")]
+	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT", hide = true)]
 	pub cert: Option<PathBuf>,
 
-	/// PEM file containing the private key for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY")]
+	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
 	pub key: Option<PathBuf>,
 
-	/// Danger: Disable TLS certificate verification on auth requests.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "auth-tls-disable-verify",
 		long = "auth-tls-disable-verify",
 		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
+		hide = true,
 		default_missing_value = "true",
 		num_args = 0..=1,
 		require_equals = true,
@@ -209,6 +203,12 @@ pub struct AuthTls {
 }
 
 impl AuthTls {
+	/// True when any deprecated `--auth-tls-*` override is configured, in which
+	/// case it takes precedence over the shared `--client-tls-*` identity.
+	fn is_set(&self) -> bool {
+		!self.root.is_empty() || self.cert.is_some() || self.key.is_some() || self.disable_verify.is_some()
+	}
+
 	/// Convert into a [`moq_native::tls::Client`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
 	fn to_client_tls(&self) -> anyhow::Result<moq_native::tls::Client> {
@@ -249,10 +249,17 @@ pub struct AuthConfig {
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
-	/// TLS configuration for outbound HTTP auth requests (JWK + public-API).
+	/// Deprecated `--auth-tls-*` overrides; see [`AuthTls`].
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: AuthTls,
+
+	/// Cluster client TLS injected by [`AuthConfig::init`] so outbound auth HTTP
+	/// (JWK + auth/public-API fetches) reuses the `--client-tls-*` identity.
+	/// Not a CLI or TOML field; the deprecated `--auth-tls-*` flags override it.
+	#[arg(skip)]
+	#[serde(skip)]
+	client_tls: Option<moq_native::tls::Client>,
 
 	/// Public (unauthenticated) access configuration.
 	///
@@ -520,7 +527,12 @@ impl PublicAccess {
 
 impl AuthConfig {
 	/// Initializes an [`Auth`] instance from this configuration.
-	pub async fn init(self) -> anyhow::Result<Auth> {
+	///
+	/// `client_tls` is the cluster client TLS (`--client-tls-*`); the auth client
+	/// reuses it for outbound HTTP unless the deprecated `--auth-tls-*` flags are
+	/// set.
+	pub async fn init(mut self, client_tls: &moq_native::tls::Client) -> anyhow::Result<Auth> {
+		self.client_tls = Some(client_tls.clone());
 		Auth::new(self).await
 	}
 
@@ -692,7 +704,20 @@ impl Auth {
 			"--auth-api cannot be combined with --auth-key/--auth-key-dir/--auth-public/--auth-public-api"
 		);
 
-		let tls = config.tls.to_client_tls()?.build()?;
+		// Outbound auth HTTP (JWK + auth/public-API fetches) reuses the cluster
+		// client's --client-tls-* identity. The deprecated --auth-tls-* flags
+		// still override it when set.
+		let tls_config = if config.tls.is_set() {
+			tracing::warn!(
+				"the --auth-tls-* flags are deprecated and will be removed; the auth client now \
+				 reuses the cluster client TLS (--client-tls-root, --client-tls-cert, --client-tls-key). \
+				 Drop --auth-tls-* and configure those instead."
+			);
+			config.tls.to_client_tls()?
+		} else {
+			config.client_tls.clone().unwrap_or_default()
+		};
+		let tls = tls_config.build()?;
 
 		let source = if let Some(key) = config.key {
 			let source = if let Ok(url) = Url::parse(&key) {
@@ -2635,6 +2660,27 @@ api = "https://api.example.com/access"
 		};
 		let token = fx.key.encode(&claims)?;
 		let verified = auth_with_identity
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token.clone()),
+			})
+			.await?;
+		assert_eq!(verified.root, "room/1".as_path());
+
+		// New path: the identity is supplied via the shared --client-tls-* config
+		// (injected through AuthConfig::init) instead of the deprecated
+		// --auth-tls-* flags. The server accepts it the same way.
+		let mut client_tls = moq_native::tls::Client::default();
+		client_tls.root = vec![fx.ca_pem_path.clone()];
+		client_tls.cert = Some(fx.client_cert_path.clone());
+		client_tls.key = Some(fx.client_key_path.clone());
+		let auth_via_client_tls = AuthConfig {
+			key_dir: Some(format!("{}/keys/", fx.base_url)),
+			..Default::default()
+		}
+		.init(&client_tls)
+		.await?;
+		let verified = auth_via_client_tls
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
