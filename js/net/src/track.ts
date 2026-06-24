@@ -162,11 +162,9 @@ export class Track {
 
 			// Discard old groups.
 			while (groups.length > 1) {
-				const frames = groups[0].state.frames.peek();
-				const next = frames.shift();
+				const next = groups[0].tryReadFrameSequence();
 				if (next) {
-					const frame = groups[0].state.total.peek() - frames.length - 1;
-					return { group: groups[0].sequence, frame, data: next };
+					return { group: groups[0].sequence, frame: next.sequence, data: next.data };
 				}
 
 				// Skip this old group
@@ -185,11 +183,9 @@ export class Track {
 
 			// If there's a group, wait for a frame.
 			const group = groups[0];
-			const frames = group.state.frames.peek();
-			const next = frames.shift();
+			const next = group.tryReadFrameSequence();
 			if (next) {
-				const frame = group.state.total.peek() - frames.length - 1;
-				return { group: group.sequence, frame, data: next };
+				return { group: group.sequence, frame: next.sequence, data: next.data };
 			}
 
 			// If the track is closed, return undefined.
@@ -197,8 +193,14 @@ export class Track {
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			// NOTE: We don't care if the latest group was closed or not.
-			await Signal.race(this.state.groups, this.state.closed, group.state.frames);
+			// Wake on a new group or the track closing. Only fold in the current group's readability
+			// while it can still deliver frames: a finished group's readable() resolves immediately, so
+			// racing it would busy-loop until a newer group arrives instead of waiting.
+			if (group.done) {
+				await Signal.race(this.state.groups, this.state.closed);
+			} else {
+				await Promise.race([Signal.race(this.state.groups, this.state.closed), group.readable()]);
+			}
 		}
 	}
 
