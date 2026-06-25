@@ -8,6 +8,7 @@ function create(props?: { rate?: number; channels?: number; capacity?: number; l
 	const capacity = props?.capacity ?? 100;
 	const init = allocSharedRingBuffer(channels, capacity, rate);
 	const buffer = new SharedRingBuffer(init);
+	buffer.declick = false; // assert raw sample positioning; declick is covered separately
 	if (props?.latency !== undefined) {
 		buffer.setLatency(props.latency);
 	} else {
@@ -571,6 +572,7 @@ describe("buffered mode", () => {
 		const init = allocSharedRingBuffer(1, 10000, 1000, true);
 		const buffer = new SharedRingBuffer(init);
 		buffer.setLatency(latency);
+		buffer.declick = false; // assert raw sample positioning, not the read-side declick ramp
 		return buffer;
 	}
 
@@ -619,6 +621,7 @@ describe("buffered mode", () => {
 		const init = allocSharedRingBuffer(1, 200, 1000, true);
 		const buffer = new SharedRingBuffer(init);
 		buffer.setLatency(50);
+		buffer.declick = false; // assert raw sample positioning, not the read-side declick ramp
 
 		insert(buffer, 0, 100, { channels: 1, value: 0.1 }); // [0, 100)
 		insert(buffer, 100, 100, { channels: 1, value: 0.2 }); // [100, 200)
@@ -628,5 +631,119 @@ describe("buffered mode", () => {
 		expect(Time.Milli.fromMicro(buffer.timestamp)).toBe(100 as Time.Milli);
 		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.2, 5);
 		expect(read(buffer, 100, 1)[0][0]).toBeCloseTo(0.3, 5);
+	});
+});
+
+describe("declick", () => {
+	// declick stays on (the production default); rate 1000 => 3-sample ramp.
+	function createDeclick(capacity: number, latency: number, channels = 1) {
+		const buffer = new SharedRingBuffer(allocSharedRingBuffer(channels, capacity, 1000));
+		buffer.setLatency(latency);
+		return buffer;
+	}
+
+	it("ramps the leading edge out of a gap fill", () => {
+		const buffer = createDeclick(100, 100);
+		insert(buffer, 0, 10, { channels: 1, value: 1.0 }); // samples [0,10)
+		insert(buffer, 20, 10, { channels: 1, value: 2.0 }); // gap [10,20), then [20,30)
+		insert(buffer, 30, 70, { channels: 1, value: 0.0 }); // fill to unstall
+
+		// Prime past the initial reader ramp, then read contiguously so what we
+		// inspect is the stored buffer, not the read-side fade.
+		read(buffer, 7, 1);
+		const out = read(buffer, 23, 1)[0];
+
+		// The pre-gap tail is left intact (samples 7,8,9): the writer can't safely
+		// fade the committed window the worklet is reading.
+		expect(out[0]).toBe(1.0);
+		expect(out[1]).toBe(1.0);
+		expect(out[2]).toBe(1.0);
+		// The gap itself is silent (samples 10..19 -> out 3..12).
+		for (let i = 3; i <= 12; i++) expect(out[i]).toBe(0);
+		// Leading edge of the 2.0 block ramps up out of the gap (samples 20,21,22).
+		expect(out[13]).toBeCloseTo(0.5, 5);
+		expect(out[14]).toBeCloseTo(1.0, 5);
+		expect(out[15]).toBeCloseTo(1.5, 5);
+		expect(out[16]).toBe(2.0);
+	});
+
+	it("ramps across a latency skip rather than jumping the signal", () => {
+		const buffer = createDeclick(200, 100);
+		insert(buffer, 0, 100, { channels: 1, value: 1.0 }); // samples [0,100)
+		read(buffer, 50, 1); // prime: reader now contiguous at 50, lastSample 1.0
+		insert(buffer, 100, 100, { channels: 1, value: 5.0 }); // samples [100,200)
+
+		buffer.setLatency(20); // force the next read to skip ahead to write-20 = 180
+		const out = read(buffer, 20, 1)[0];
+
+		// READ jumps from 50 into the 5.0 region, ramping up from the last 1.0 sample.
+		expect(out[0]).toBeCloseTo(2.0, 5);
+		expect(out[1]).toBeCloseTo(3.0, 5);
+		expect(out[2]).toBeCloseTo(4.0, 5);
+		expect(out[3]).toBe(5.0);
+	});
+
+	it("ramps out into the trailing silence on underrun", () => {
+		const buffer = createDeclick(100, 20);
+		insert(buffer, 0, 20, { channels: 1, value: 2.0 }); // exactly latency, unstalls, no skip
+
+		// Ask for more than is buffered: the tail ramps down to the trailing zeros.
+		const output = [new Float32Array(30)];
+		const count = buffer.read(output);
+		expect(count).toBe(20);
+		const out = output[0];
+
+		expect(out[10]).toBe(2.0); // steady state in the middle
+		expect(out[17]).toBeCloseTo(1.5, 5);
+		expect(out[18]).toBeCloseTo(1.0, 5);
+		expect(out[19]).toBeCloseTo(0.5, 5);
+	});
+
+	it("leaves contiguous reads untouched", () => {
+		const buffer = createDeclick(100, 30);
+		insert(buffer, 0, 30, { channels: 1, value: 4.0 });
+
+		read(buffer, 10, 1); // prime
+		const out = read(buffer, 20, 1)[0]; // contiguous: no ramp
+		for (let i = 0; i < 20; i++) expect(out[i]).toBe(4.0);
+	});
+
+	it("ramps in from silence after an underrun, not from the stale sample", () => {
+		const buffer = createDeclick(200, 20);
+		insert(buffer, 0, 20, { channels: 1, value: 2.0 }); // exactly latency: unstall, no skip
+
+		// Drain exactly what's buffered. count === frames, so there's no trailing
+		// fade-out; the declick reference is left at the last real sample (2.0).
+		const first = read(buffer, 20, 1)[0];
+		expect(first[19]).toBe(2.0);
+
+		// Nothing buffered: this read underruns. The output is silence, so the
+		// declick reference must reset to 0.
+		expect(read(buffer, 20, 1)[0].length).toBe(0);
+
+		// Fresh contiguous audio arrives. The leading edge must ramp up from 0 (the
+		// silence that actually played), not from the stale 2.0 (which would click).
+		insert(buffer, 20, 20, { channels: 1, value: 5.0 });
+		const out = read(buffer, 20, 1)[0];
+		expect(out[0]).toBeCloseTo(1.25, 5); // 5 * 1/4, ramping from 0
+		expect(out[1]).toBeCloseTo(2.5, 5);
+		expect(out[2]).toBeCloseTo(3.75, 5);
+		expect(out[3]).toBe(5.0);
+	});
+});
+
+describe("backlog after a stall", () => {
+	it("skips straight to the live edge and keeps playing (no mid-stream silence)", () => {
+		// Simulates resume after the worklet wasn't draining: a huge backlog.
+		const buffer = create({ rate: 1000, channels: 1, capacity: 2000, latency: 100 });
+		insert(buffer, 0, 1000, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
+
+		// The read trims to the latency target and returns a full quantum of audio,
+		// never stalling: continuous playback a bit behind live, no refill gap.
+		const out = read(buffer, 128, 1);
+		expect(out[0].length).toBe(100); // latency worth remains after the skip
+		expect(buffer.stalled).toBe(false);
+		expect(buffer.length).toBe(0); // consumed the trimmed window, but never re-stalled
 	});
 });
