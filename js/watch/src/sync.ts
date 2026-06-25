@@ -31,6 +31,10 @@ export function latencyFromBounds(min: Bound, max: Bound): Latency {
 const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
+// A backward media-time jump larger than this is treated as a stream restart
+// (new PTS epoch) rather than reordering, and re-baselines the reference clock.
+const DISCONTINUITY = 1000 as Time.Milli;
+
 export interface SyncProps {
 	// Latency target: a scalar minimizes (collapsed range), an object opens a range. See {@link Latency}.
 	latency?: Latency | Signal<Latency>;
@@ -72,10 +76,6 @@ export class Sync {
 	#buffer = new Signal<Time.Milli>(Time.Milli.zero);
 	readonly buffer: Signal<Time.Milli> = this.#buffer;
 
-	// A ghetto way to learn when the reference/buffer changes.
-	// There's probably a way to use Effect, but lets keep it simple for now.
-	#update: PromiseWithResolvers<void>;
-
 	// The media timestamp of the most recently received frame.
 	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
@@ -97,8 +97,6 @@ export class Sync {
 		this.#connection = props?.connection;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
-
-		this.#update = Promise.withResolvers();
 
 		this.signals.run(this.#runJitter.bind(this));
 		this.signals.run(this.#runBuffer.bind(this));
@@ -166,15 +164,25 @@ export class Sync {
 
 		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#buffer.set(buffer);
-
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// Fold a newly received frame into the reference. The reference anchors playback to the
 	// wall clock; we lower it (skip ahead) only when keeping it would push latency past the cap.
 	received(timestamp: Time.Milli, label = ""): void {
-		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
+		const lastMax = this.timestamp.peek();
+
+		// A large backward jump in media time means the publisher restarted with a
+		// fresh PTS epoch. #reference is still pinned to the previous stream, and
+		// since we only ever keep the minimum it would never recover, leaving now()
+		// far ahead of the new frames. Re-baseline so pacing works on the new stream.
+		if (lastMax !== undefined && timestamp < lastMax - DISCONTINUITY) {
+			this.#reference.set(undefined);
+			this.timestamp.set(timestamp);
+			this.#late.clear();
+		} else {
+			this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
+		}
+
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
@@ -185,9 +193,8 @@ export class Sync {
 			return;
 		}
 
-		// Check if `wait()` would not sleep at all.
-		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
-		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
+		// Detect frames received later than their scheduled play time, so we can distinguish
+		// "the network is dropping us behind" from CPU starvation in downstream pacing.
 		const floor = this.#buffer.peek();
 		const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), floor);
 		if (sleep < 0) {
@@ -221,8 +228,6 @@ export class Sync {
 
 	#setReference(ref: Time.Milli): void {
 		this.#reference.set(ref);
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// Re-anchor playback to the next frame received. Call this at an utterance boundary
@@ -231,8 +236,6 @@ export class Sync {
 	reset(): void {
 		this.#reference.set(undefined);
 		this.#late.clear();
-		this.#update.resolve();
-		this.#update = Promise.withResolvers();
 	}
 
 	// The PTS that should be rendering right now, derived from the reference + buffer.
@@ -241,35 +244,6 @@ export class Sync {
 		const reference = this.#reference.peek();
 		if (reference === undefined) return undefined;
 		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#buffer.peek());
-	}
-
-	// Sleep until it's time to render this frame.
-	async wait(timestamp: Time.Milli): Promise<void> {
-		const reference = this.#reference.peek();
-		if (reference === undefined) {
-			throw new Error("reference not set; call update() first");
-		}
-
-		for (;;) {
-			// Sleep until it's time to decode the next frame.
-			// NOTE: This function runs in parallel for each frame.
-			const now = Time.Milli.now();
-			const ref = Time.Milli.sub(now, timestamp);
-
-			const currentRef = this.#reference.peek();
-			if (currentRef === undefined) return;
-
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
-			if (sleep <= 0) return;
-
-			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
-			if (sleep < 5) return;
-
-			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
-
-			const ok = await Promise.race([this.#update.promise, wait]);
-			if (ok) return;
-		}
 	}
 
 	static #formatDuration(ms: number): string {
