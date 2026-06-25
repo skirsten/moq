@@ -13,6 +13,12 @@ import type { Source } from "./source";
 const BUFFERING = 500 as Time.Milli;
 const SWITCH = 100 as Time.Milli;
 
+// Cap on decoded frames + decoder input queue. Each decoded VideoFrame
+// pins a GPU surface, so without a cap this would grow to latency * fps.
+// Backpressuring decoder.decode() pushes the wait upstream into
+// Container.Consumer, where it costs encoded bytes instead. Written by Claude.
+const QUEUE_CAP = 8;
+
 export type DecoderProps = {
 	enabled?: boolean | Signal<boolean>;
 };
@@ -29,11 +35,7 @@ export class Decoder implements Backend {
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
 
-	// Expose the current frame to render as a signal
-	#frame = new Signal<VideoFrame | undefined>(undefined);
-	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
-
-	// The timestamp of the current frame.
+	// The timestamp of the most recently consumed frame.
 	#timestamp = new Signal<Time.Milli | undefined>(undefined);
 	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
 
@@ -53,12 +55,17 @@ export class Decoder implements Backend {
 
 	#signals = new Effect();
 
-	#clearCurrentFrame(): void {
-		this.#frame.update((prev) => {
-			prev?.close();
-			return undefined;
-		});
-		this.#timestamp.set(undefined);
+	// Pop the newest decoded frame whose PTS is at or before sync.now(), closing
+	// any older queued frames. The caller takes ownership of the returned frame
+	// and is responsible for closing it. Returns undefined if no frame is ready.
+	consume(): VideoFrame | undefined {
+		const active = this.#active.peek();
+		if (!active) return undefined;
+
+		const now = this.source.sync.now();
+		if (now === undefined) return undefined;
+
+		return active.consume(now);
 	}
 
 	constructor(source: Source, props?: DecoderProps) {
@@ -85,9 +92,10 @@ export class Decoder implements Backend {
 
 		const broadcast: Moq.Broadcast | undefined = effect.get(source.active);
 		if (!broadcast) {
-			// Going offline should clear the last rendered frame.
+			// Going offline should clear the last rendered timestamp so the
+			// buffering overlay logic in #runBuffering treats us as stalled.
 			this.#active.set(undefined);
-			this.#clearCurrentFrame();
+			this.#timestamp.set(undefined);
 			this.#buffered.set([]);
 			return;
 		}
@@ -108,16 +116,20 @@ export class Decoder implements Backend {
 
 			const active = effect.get(this.#active);
 			if (active) {
-				const pendingTimestamp = effect.get(pending.timestamp);
+				// Compare the pending track's decode frontier against the active
+				// playhead: a pending track is never consumed, so its `timestamp`
+				// stays undefined. `decoded` tracks how far it has buffered.
+				const pendingDecoded = effect.get(pending.decoded);
 				const activeTimestamp = effect.get(active.timestamp);
 
 				// Switch to the new track if it's ready and we've caught up enough.
-				if (!pendingTimestamp) return;
-				if (activeTimestamp && activeTimestamp > pendingTimestamp + SWITCH) return;
+				if (!pendingDecoded) return;
+				if (activeTimestamp && activeTimestamp > pendingDecoded + SWITCH) return;
 			}
 
 			// Upgrade the pending track to active.
 			// #runActive will be in charge of it now.
+			pending.promote();
 			this.#active.set(pending);
 			pending = undefined;
 
@@ -136,15 +148,6 @@ export class Decoder implements Backend {
 
 		effect.cleanup(() => active.close());
 
-		// Clone the frame so we own it independently of the DecoderTrack.
-		// proxy() would share the same reference, allowing the source to close our frame.
-		effect.run((inner) => {
-			const frame = inner.get(active.frame);
-			this.#frame.update((prev) => {
-				prev?.close();
-				return frame?.clone();
-			});
-		});
 		effect.proxy(this.#timestamp, active.timestamp);
 		effect.proxy(this.#buffered, active.buffered);
 	}
@@ -162,21 +165,21 @@ export class Decoder implements Backend {
 			return;
 		}
 
-		const frame = effect.get(this.frame);
-		if (!frame) return;
+		const active = effect.get(this.#active);
+		if (!active) return;
 
-		effect.set(this.#display, {
-			width: frame.displayWidth,
-			height: frame.displayHeight,
-		});
+		const dims = effect.get(active.display);
+		if (!dims) return;
+
+		effect.set(this.#display, dims);
 	}
 
 	#runBuffering(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const frame = effect.get(this.frame);
-		if (!frame) {
+		const timestamp = effect.get(this.#timestamp);
+		if (timestamp === undefined) {
 			this.#stalled.set(true);
 			return;
 		}
@@ -189,8 +192,6 @@ export class Decoder implements Backend {
 	}
 
 	close() {
-		this.#clearCurrentFrame();
-
 		this.#signals.close();
 	}
 }
@@ -211,8 +212,17 @@ class DecoderTrack {
 	config: RequiredDecoderConfig;
 	stats: Signal<Stats | undefined>;
 
+	// The PTS of the most recently consumed (painted) frame.
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
-	frame = new Signal<VideoFrame | undefined>(undefined);
+
+	// The PTS of the newest decoded frame, set at queue time. Reflects how far a
+	// track has buffered even before it becomes active, so #runPending can decide
+	// when a pending track is ready to take over.
+	decoded = new Signal<Time.Milli | undefined>(undefined);
+
+	// Display dimensions taken from the first decoded frame, used as a fallback
+	// when the catalog doesn't carry display metadata.
+	display = new Signal<{ width: number; height: number } | undefined>(undefined);
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<BufferedRanges>([]);
@@ -220,9 +230,21 @@ class DecoderTrack {
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<BufferedRanges>([]);
 
-	// The last discontinuity count seen from the container consumer; doubles as a generation
-	// so in-flight decodes from before a rewind can be dropped on output.
+	// The last discontinuity count seen from the container consumer. A change means
+	// the publisher rewound the timeline, so we flush the decode queue and re-anchor.
 	#discontinuity = 0;
+
+	// Decoded frames awaiting paint, in PTS-ascending order. VideoDecoder
+	// emits in display order, so push order is already monotonic.
+	#queue: VideoFrame[] = [];
+
+	#queueDrain = Promise.withResolvers<void>();
+
+	// Whether this track has been promoted to active. A pending track is never
+	// consumed, so while false the output callback drops all but the newest
+	// frame to keep decoding (and `decoded`) racing toward the live edge instead
+	// of stalling at QUEUE_CAP.
+	#promoted = false;
 
 	signals = new Effect();
 
@@ -244,45 +266,33 @@ class DecoderTrack {
 		effect.cleanup(() => sub.close());
 
 		const decoder = new VideoDecoder({
-			output: async (frame: VideoFrame) => {
-				try {
-					// The generation this frame was decoded in. If a rewind bumps it while we wait
-					// below, this frame belongs to the reneged timeline and must be dropped.
-					const generation = this.#discontinuity;
+			output: (frame: VideoFrame) => {
+				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 
-					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-					if (timestamp < (this.timestamp.peek() ?? 0)) {
-						// Late frame, don't render it.
-						return;
-					}
-
-					if (this.frame.peek() === undefined) {
-						// Render something while we wait for the sync to catch up.
-						this.frame.set(frame.clone());
-					}
-
-					const wait = this.source.sync.wait(timestamp).then(() => true);
-					const ok = await Promise.race([wait, effect.cancel]);
-					if (!ok) return;
-					if (generation !== this.#discontinuity) return; // a rewind happened while waiting
-
-					if (timestamp < (this.timestamp.peek() ?? 0)) {
-						// Late frame, don't render it.
-						// NOTE: This can happen when the ref is updated, such as on playback start.
-						return;
-					}
-
-					this.timestamp.set(timestamp);
-
-					// Trim the decode buffer as frames are rendered
-					this.#trimBuffered(timestamp);
-
-					this.frame.update((prev) => {
-						prev?.close();
-						return frame.clone(); // avoid closing the frame here
-					});
-				} finally {
+				// Drop frames that have already been displayed (can happen if the
+				// reference resets, e.g. on playback start).
+				if (timestamp < (this.timestamp.peek() ?? 0)) {
 					frame.close();
+					return;
+				}
+
+				// Capture display dimensions from the first frame so #runDisplay
+				// can fall back to them when the catalog has no display metadata.
+				if (this.display.peek() === undefined) {
+					this.display.set({ width: frame.displayWidth, height: frame.displayHeight });
+				}
+
+				// Queue for the renderer to pick up on its next vsync.
+				this.#queue.push(frame);
+				this.decoded.set(timestamp);
+
+				// While pending, nothing consumes the queue, so drop everything but
+				// the newest frame and release backpressure. This lets the track
+				// catch up to live before it takes over (e.g. on a rendition switch).
+				if (!this.#promoted) {
+					while (this.#queue.length > 1) this.#queue.shift()?.close();
+					this.#queueDrain.resolve();
+					this.#queueDrain = Promise.withResolvers<void>();
 				}
 			},
 			// TODO bubble up error
@@ -293,6 +303,9 @@ class DecoderTrack {
 		});
 		effect.cleanup(() => {
 			if (decoder.state !== "closed") decoder.close();
+			// Drain any frames the renderer never got to.
+			for (const frame of this.#queue) frame.close();
+			this.#queue.length = 0;
 		});
 
 		// Input processing - depends on container type
@@ -378,6 +391,8 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (!(await this.#awaitQueueSpace(effect, decoder))) return;
+				if (decoder.state === "closed") break;
 				decoder.decode(chunk);
 			}
 		});
@@ -455,6 +470,7 @@ class DecoderTrack {
 					final: false,
 				};
 
+				if (!(await this.#awaitQueueSpace(effect, decoder))) return;
 				if (decoder.state === "closed") break;
 				decoder.decode(
 					new EncodedVideoChunk({
@@ -468,17 +484,23 @@ class DecoderTrack {
 	}
 
 	// React to the container consumer's discontinuity counter. On a change the publisher has
-	// rewound the timeline, so drop what's queued downstream and re-anchor the shared clock
-	// before the new utterance. Clearing `timestamp` is load-bearing: otherwise its stale high
-	// value would late-reject the rewound (lower-timestamp) frames at the output guard. Bumping
-	// the generation drops in-flight decodes on output. The held frame is left in place so the
-	// last picture shows until the new keyframe renders, instead of flashing empty. Returns true
-	// if a rewind was handled.
+	// rewound the timeline, so drop the decode queue and re-anchor the shared clock before the
+	// new utterance. Clearing `timestamp` is load-bearing: otherwise its stale high value would
+	// late-reject the rewound (lower-timestamp) frames at the output guard. Returns true if a
+	// rewind was handled.
 	#onDiscontinuity(count: number): boolean {
 		if (count === this.#discontinuity) return false;
 		this.#discontinuity = count;
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
+
+		// Drop decoded-but-unpainted frames from the old timeline and release any
+		// decode backpressure waiting on queue space.
+		for (const frame of this.#queue) frame.close();
+		this.#queue.length = 0;
+		this.#queueDrain.resolve();
+		this.#queueDrain = Promise.withResolvers<void>();
+
 		this.source.sync.reset();
 		return true;
 	}
@@ -515,14 +537,78 @@ class DecoderTrack {
 		});
 	}
 
+	// Mark this track as active. After this the output callback stops trimming
+	// the queue so the render buffer can build up normally.
+	promote(): void {
+		this.#promoted = true;
+	}
+
+	// Pop the newest queued frame whose PTS is <= now, closing any older ones.
+	// Caller takes ownership of the returned frame and must close it.
+	consume(now: Time.Milli): VideoFrame | undefined {
+		const frame = consumeFrame(this.#queue, now);
+		if (!frame) return undefined;
+
+		this.#queueDrain.resolve();
+		this.#queueDrain = Promise.withResolvers<void>();
+
+		const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+		this.timestamp.set(timestamp);
+		this.#trimBuffered(timestamp);
+
+		return frame;
+	}
+
+	// AbortSignal with explicit removal, not Promise.race against
+	// effect.cancel, to avoid leaking a PromiseReaction per iteration onto
+	// the long-lived cancel promise (see #1400). Written by Claude.
+	async #awaitQueueSpace(effect: Effect, decoder: VideoDecoder): Promise<boolean> {
+		const abort = effect.abort;
+		while (this.#queue.length + decoder.decodeQueueSize >= QUEUE_CAP) {
+			if (abort.aborted) return false;
+			const aborted = await new Promise<boolean>((resolve) => {
+				const onAbort = () => resolve(true);
+				abort.addEventListener("abort", onAbort, { once: true });
+				this.#queueDrain.promise.then(() => {
+					abort.removeEventListener("abort", onAbort);
+					resolve(false);
+				});
+			});
+			if (aborted) return false;
+		}
+		return true;
+	}
+
 	close(): void {
 		this.signals.close();
-
-		this.frame.update((prev) => {
-			prev?.close();
-			return undefined;
-		});
 	}
+}
+
+export interface ConsumableFrame {
+	readonly timestamp: number; // microseconds
+	close(): void;
+}
+
+// Pop the newest frame in `queue` whose PTS is <= now, closing any older
+// entries. Mutates the queue.
+export function consumeFrame<F extends ConsumableFrame>(queue: F[], now: Time.Milli): F | undefined {
+	let pickIdx = -1;
+	for (let i = queue.length - 1; i >= 0; i--) {
+		const ts = Time.Milli.fromMicro(queue[i].timestamp as Time.Micro);
+		if (ts <= now) {
+			pickIdx = i;
+			break;
+		}
+	}
+	if (pickIdx < 0) return undefined;
+
+	for (let i = 0; i < pickIdx; i++) {
+		queue[i].close();
+	}
+
+	const frame = queue[pickIdx];
+	queue.splice(0, pickIdx + 1);
+	return frame;
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
