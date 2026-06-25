@@ -62,6 +62,11 @@ export class Decoder {
 	// publisher rewound the timeline (e.g. a voice agent interrupted) and we must flush.
 	#discontinuity = 0;
 
+	// Whether the decoder has been primed once. The first decoder drops a few
+	// warmup frames to settle the codec, but later decoders (re-subscribe after
+	// unmute) must not, or they punch a silent hole into the resumed stream.
+	#primed = false;
+
 	#signals = new Effect();
 
 	// How much buffered audio the container consumer retains before skipping
@@ -234,11 +239,16 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					warmed++;
-					if (warmed <= 3) {
-						// Drop the first 3 frames to prime the decoder.
-						data.close();
-						return;
+					// Only prime (drop the first few frames) on the very first decoder.
+					// On a re-subscribe the stream is already live, so dropping would
+					// leave a silent gap in the resumed audio.
+					if (!this.#primed) {
+						warmed++;
+						if (warmed <= 3) {
+							data.close();
+							return;
+						}
+						this.#primed = true;
 					}
 					this.#emit(data);
 				},

@@ -1,5 +1,9 @@
 import { Time } from "@moq/net";
 
+// Length of the linear ramp used to hide sample discontinuities (overflow,
+// resize, gap fills, underrun). ~3ms kills the click without being audible.
+const DECLICK_SECONDS = 0.003;
+
 export class AudioRingBuffer {
 	#buffer: Float32Array[];
 	#writeIndex = 0;
@@ -15,6 +19,15 @@ export class AudioRingBuffer {
 	#latencySamples: number;
 	// Whether the read/write indices have been anchored to the first inserted sample.
 	#anchored = false;
+
+	// Apply short ramps around sample discontinuities to suppress clicks. On by
+	// default; tests turn it off to assert raw sample positioning.
+	declick = true;
+
+	// Reader-side declick state, tracking playback continuity across read() calls.
+	#fade: number;
+	#expectedRead?: number;
+	#lastSample: Float32Array;
 
 	constructor(props: {
 		rate: number;
@@ -42,6 +55,9 @@ export class AudioRingBuffer {
 		for (let i = 0; i < this.channels; i++) {
 			this.#buffer[i] = new Float32Array(capacity);
 		}
+
+		this.#fade = Math.max(1, Math.round(this.rate * DECLICK_SECONDS));
+		this.#lastSample = new Float32Array(this.channels);
 	}
 
 	#capacityFor(latencySamples: number): number {
@@ -136,7 +152,8 @@ export class AudioRingBuffer {
 		}
 
 		// Fill gaps with zeros if there's a discontinuity
-		if (start > this.#writeIndex) {
+		const hadGap = start > this.#writeIndex;
+		if (hadGap) {
 			const gapSize = Math.min(start - this.#writeIndex, this.#buffer[0].length);
 			if (gapSize === 1) {
 				console.warn("floating point inaccuracy detected");
@@ -151,7 +168,10 @@ export class AudioRingBuffer {
 			}
 		}
 
-		// Write the actual samples
+		// Write the actual samples, ramping the leading edge up out of a gap fill so
+		// the silence->signal edge doesn't click. (Kept symmetric with the shared
+		// buffer, which can't safely fade the committed pre-gap tail.)
+		const fadeIn = hadGap && this.declick ? Math.min(this.#fade, samples) : 0;
 		for (let channel = 0; channel < this.channels; channel++) {
 			let src = data[channel];
 			src = src.subarray(src.length - samples);
@@ -161,7 +181,7 @@ export class AudioRingBuffer {
 
 			for (let i = 0; i < samples; i++) {
 				const writePos = (start + i) % dst.length;
-				dst[writePos] = src[i];
+				dst[writePos] = i < fadeIn ? src[i] * ((i + 1) / (fadeIn + 1)) : src[i];
 			}
 		}
 
@@ -187,24 +207,48 @@ export class AudioRingBuffer {
 
 	read(output: Float32Array[]): number {
 		if (output.length !== this.channels) throw new Error("wrong number of channels");
-		if (this.#stalled) return 0;
+		if (this.#stalled) {
+			// Output is silence, so reset the declick reference to 0; otherwise the
+			// next read ramps from a stale pre-stall sample and clicks.
+			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
+			return 0;
+		}
 
-		const samples = Math.min(this.#writeIndex - this.#readIndex, output[0].length);
-		if (samples === 0) return 0;
+		const frames = output[0].length;
+		const samples = Math.min(this.#writeIndex - this.#readIndex, frames);
+		if (samples === 0) {
+			// Underrun: silence out, same reset as the stalled case.
+			this.#expectedRead = undefined;
+			this.#lastSample.fill(0);
+			return 0;
+		}
+
+		// Ramp in from the last emitted sample when READ jumped (overflow/resize
+		// advanced it between calls), and ramp out into the trailing zeros on an
+		// underrun, so neither edge clicks.
+		const jumped = this.#expectedRead === undefined || this.#readIndex !== this.#expectedRead;
+		const fadeIn = this.declick && jumped ? Math.min(samples, this.#fade) : 0;
+		const fadeOut = this.declick && samples < frames ? Math.min(samples, this.#fade) : 0;
 
 		for (let channel = 0; channel < this.channels; channel++) {
 			const dst = output[channel];
 			const src = this.#buffer[channel];
+			const last = this.#lastSample[channel];
 
-			if (dst.length !== output[0].length) throw new Error("mismatching number of samples");
+			if (dst.length !== frames) throw new Error("mismatching number of samples");
 
 			for (let i = 0; i < samples; i++) {
-				const readPos = (this.#readIndex + i) % src.length;
-				dst[i] = src[readPos];
+				let sample = src[(this.#readIndex + i) % src.length];
+				if (i < fadeIn) sample = last + (sample - last) * ((i + 1) / (fadeIn + 1));
+				if (fadeOut > 0 && i >= samples - fadeOut) sample *= (samples - i) / (fadeOut + 1);
+				dst[i] = sample;
 			}
+			this.#lastSample[channel] = fadeOut > 0 ? 0 : dst[samples - 1];
 		}
 
 		this.#readIndex += samples;
+		this.#expectedRead = this.#readIndex;
 		return samples;
 	}
 }
