@@ -65,6 +65,9 @@ class VideoBackend implements Video.Backend {
 	// The timestamp of the current frame
 	timestamp = new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero);
 
+	// Optional custom paint hook for the WebCodecs canvas renderer. Ignored under MSE.
+	draw = new Signal<Video.DrawFrame | undefined>(undefined);
+
 	constructor(source: Video.Source) {
 		this.source = source;
 	}
@@ -175,6 +178,7 @@ export class MultiBackend implements Backend {
 			canvas: element,
 			paused: this.paused,
 			visible: this.visible,
+			draw: this.video.draw,
 		});
 
 		effect.cleanup(() => {
