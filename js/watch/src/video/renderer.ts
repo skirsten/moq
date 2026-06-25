@@ -17,6 +17,11 @@ const INTERSECTION_THRESHOLD = 0.01;
  */
 export type Visible = "never" | "always" | (string & {});
 
+// A custom paint hook. Receives the 2D context and the frame to draw. The
+// canvas is already sized to the element's device pixels (not the video's
+// native size), so callers paint in the same coordinate space the user sees.
+export type DrawFrame = (ctx: CanvasRenderingContext2D, frame: VideoFrame) => void;
+
 /** Options for {@link Renderer}. */
 export type RendererProps = {
 	/** The canvas to render decoded frames to. */
@@ -25,6 +30,13 @@ export type RendererProps = {
 	paused?: boolean | Signal<boolean>;
 	/** When video is downloaded relative to the canvas position. See {@link Visible}. Defaults to `"20%"`. */
 	visible?: Visible | Signal<Visible>;
+	/**
+	 * When set, the renderer sizes the canvas backing store to the element's
+	 * device pixels instead of the video's native size, and calls this for every
+	 * painted frame instead of the built-in draw. Lets callers implement effects
+	 * like letterboxing or reflections that need to paint outside the video rect.
+	 */
+	draw?: DrawFrame | Signal<DrawFrame | undefined>;
 };
 
 /** Decodes a video track and paints it to a canvas, gating downloads on canvas visibility. */
@@ -39,6 +51,9 @@ export class Renderer {
 
 	// When video is downloaded relative to the canvas position. See {@link Visible}.
 	visible: Signal<Visible>;
+
+	// Optional custom paint hook. See RendererProps.draw.
+	draw: Signal<DrawFrame | undefined>;
 
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
@@ -56,6 +71,7 @@ export class Renderer {
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
 		this.visible = Signal.from(props?.visible ?? "20%");
+		this.draw = Signal.from(props?.draw);
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -69,9 +85,18 @@ export class Renderer {
 	}
 
 	#runResize(effect: Effect) {
-		const values = effect.getAll([this.canvas, this.decoder.display]);
-		if (!values) return; // Keep current canvas size until we have new dimensions
-		const [canvas, display] = values;
+		const canvas = effect.get(this.canvas);
+		if (!canvas) return;
+
+		// With a custom draw hook the backing store tracks the element's device
+		// pixels (so the hook paints 1:1 with what's on screen), not the video.
+		if (effect.get(this.draw)) {
+			this.#runResizeElement(effect, canvas);
+			return;
+		}
+
+		const display = effect.get(this.decoder.display);
+		if (!display) return; // Keep current canvas size until we have new dimensions
 
 		// Only update if dimensions actually changed (setting canvas.width/height clears the canvas)
 		// TODO I thought the signals library would prevent this, but I'm too lazy to investigate.
@@ -84,8 +109,43 @@ export class Renderer {
 			// the canvas black.
 			const ctx = this.#ctx.peek();
 			const frame = this.frame.peek();
-			if (ctx && frame) this.#draw(ctx, frame);
+			if (ctx && frame) this.#paint(ctx, frame);
 		}
+	}
+
+	// Size the backing store to the element's rendered device pixels. Used only
+	// when a custom draw hook is set, so effects like a reflection have room to
+	// paint below the video rect.
+	#runResizeElement(effect: Effect, canvas: HTMLCanvasElement) {
+		const apply = (width: number, height: number) => {
+			if (!width || !height) return;
+			if (canvas.width === width && canvas.height === height) return;
+			canvas.width = width;
+			canvas.height = height;
+
+			const ctx = this.#ctx.peek();
+			const frame = this.frame.peek();
+			if (ctx && frame) this.#paint(ctx, frame);
+		};
+
+		const observer = new ResizeObserver((entries) => {
+			const entry = entries[0];
+			const box = entry.devicePixelContentBoxSize?.[0];
+			if (box) {
+				apply(box.inlineSize, box.blockSize);
+			} else {
+				// Safari lacks device-pixel-content-box; approximate from CSS px.
+				const dpr = globalThis.devicePixelRatio || 1;
+				apply(Math.round(entry.contentRect.width * dpr), Math.round(entry.contentRect.height * dpr));
+			}
+		});
+
+		try {
+			observer.observe(canvas, { box: "device-pixel-content-box" });
+		} catch {
+			observer.observe(canvas);
+		}
+		effect.cleanup(() => observer.disconnect());
 	}
 
 	// Track whether video should currently download.
@@ -165,14 +225,14 @@ export class Renderer {
 		// blank. Paint the cached frame once so a swap while paused isn't black
 		// until playback resumes.
 		const cached = this.frame.peek();
-		if (cached) this.#draw(ctx, cached);
+		if (cached) this.#paint(ctx, cached);
 
 		let rafId: number | undefined;
 
 		const tick = () => {
 			const frame = this.decoder.consume();
 			if (frame) {
-				this.#draw(ctx, frame);
+				this.#paint(ctx, frame);
 				this.frame.update((old) => {
 					old?.close();
 					return frame; // transfer ownership from consume()
@@ -188,6 +248,12 @@ export class Renderer {
 		effect.cleanup(() => {
 			if (rafId !== undefined) cancelAnimationFrame(rafId);
 		});
+	}
+
+	#paint(ctx: CanvasRenderingContext2D, frame: VideoFrame) {
+		const draw = this.draw.peek();
+		if (draw) draw(ctx, frame);
+		else this.#draw(ctx, frame);
 	}
 
 	#draw(ctx: CanvasRenderingContext2D, frame: VideoFrame) {

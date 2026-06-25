@@ -1,6 +1,7 @@
 import type * as Moq from "@moq/net";
-import type { Getter } from "@moq/signals";
+import type { Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../buffered";
+import type { DrawFrame } from "./renderer";
 import type { Source } from "./source";
 
 /** Video-specific signals that work regardless of the backend source (MSE vs WebCodecs). */
@@ -19,6 +20,9 @@ export interface Backend {
 
 	/** The timestamp of the current frame. */
 	timestamp: Getter<Moq.Time.Milli | undefined>;
+
+	// Optional custom paint hook (WebCodecs only).
+	draw?: Signal<DrawFrame | undefined>;
 }
 
 /** Video playback statistics. */
