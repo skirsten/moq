@@ -15,20 +15,22 @@ use super::hang::{Catalog, CatalogExt, Consumer, Extra};
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
-/// Three tracks are published together on drop of the guard: the hang (`catalog.json`), its
-/// DEFLATE-compressed `.z` sibling (`catalog.json.z`), and MSF (`catalog`).
+/// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
 ///
-/// The hang tracks are published through [`moq_json`], which currently emits one snapshot per
+/// The hang track is published through [`moq_json`], which currently emits one snapshot per
 /// group (deltas disabled). This routes catalog publishing through the JSON merge-patch helper
-/// so deltas can be enabled later without changing the wire format used today. The `.z` track
-/// carries the identical catalog, compressed; consumers opt into it via
-/// [`CatalogFormat::HangZ`](super::CatalogFormat::HangZ).
-pub struct Producer<E: CatalogExt = Extra> {
+/// so deltas can be enabled later without changing the wire format used today.
+pub struct Producer<E: CatalogExt = ()> {
 	hang: moq_json::Producer<Catalog<E>>,
 	hangz: moq_json::Producer<Catalog<E>>,
 	msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<Catalog<E>>>,
+
+	/// Shared wall clock for the broadcast's tracks. Every importer on this catalog
+	/// gets a clone (a `Copy` of the same epoch), so timestamps they synthesize when
+	/// a caller has none land on one timeline and audio/video stay in sync.
+	clock: crate::Clock,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -39,17 +41,26 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			hangz: self.hangz.clone(),
 			msf_track: self.msf_track.clone(),
 			current: self.current.clone(),
+			clock: self.clock,
 		}
 	}
 }
 
-impl Producer<Extra> {
+impl Producer<()> {
 	/// Create a new catalog producer with the default (empty) catalog.
 	///
-	/// The catalog carries the untyped [`Extra`] extension, so application sections can be set
-	/// later via [`set_section`](Self::set_section). To publish a *typed* extension instead, use
-	/// [`with_catalog`](Self::with_catalog) with a `Catalog<YourExt>`.
+	/// To publish an extended catalog, use [`with_catalog`](Self::with_catalog) with a `Catalog<E>`.
 	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
+		Self::with_catalog(broadcast, Catalog::default())
+	}
+}
+
+impl Producer<Extra> {
+	/// Create a catalog producer carrying the untyped [`Extra`] extension, so application
+	/// sections can be set later via [`set_section`](Self::set_section). This is the entry
+	/// point for callers that work with sections by name (e.g. the FFI boundary); for a typed
+	/// extension use [`with_catalog`](Self::with_catalog) with a `Catalog<YourExt>`.
+	pub fn new_extra(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, Catalog::default())
 	}
 
@@ -57,7 +68,8 @@ impl Producer<Extra> {
 	///
 	/// `value` is any JSON document (object, array, string, ...). Errors if `name` collides with a
 	/// reserved media section (`video`/`audio`). This is the untyped counterpart to mutating a
-	/// typed extension through [`lock`](Self::lock).
+	/// typed extension through [`lock`](Self::lock), used where section names aren't known at
+	/// compile time (e.g. across the FFI boundary).
 	pub fn set_section(&mut self, name: impl Into<String>, value: serde_json::Value) -> crate::Result<()> {
 		self.lock().set_section(name, value)
 	}
@@ -76,9 +88,15 @@ impl<E: CatalogExt> Producer<E> {
 		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: Catalog<E>,
 	) -> Result<Self, moq_net::Error> {
-		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
+		let hang_track = broadcast.create_track(moq_net::Track {
+			name: hang::Catalog::DEFAULT_NAME.to_string(),
+			priority: 0,
+		})?;
 		let hangz_track = broadcast.create_track(hang::Catalog::compressed_track())?;
-		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
+		let msf_track = broadcast.create_track(moq_net::Track {
+			name: moq_msf::DEFAULT_NAME.to_string(),
+			priority: 0,
+		})?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::ProducerConfig::default();
@@ -95,7 +113,20 @@ impl<E: CatalogExt> Producer<E> {
 			hangz,
 			msf_track,
 			current: Arc::new(Mutex::new(catalog)),
+			clock: crate::Clock::new(),
 		})
+	}
+
+	/// Resolve a timestamp, synthesizing one from the broadcast's shared
+	/// [`Clock`](crate::Clock) when the caller has none.
+	///
+	/// Sharing the clock across the catalog's tracks keeps concurrently-produced
+	/// audio and video on a single timeline.
+	pub fn timestamp(&self, hint: Option<crate::container::Timestamp>) -> crate::Result<crate::container::Timestamp> {
+		match hint {
+			Some(pts) => Ok(pts),
+			None => Ok(crate::container::Timestamp::from_micros(self.clock.micros())?),
+		}
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
@@ -112,6 +143,20 @@ impl<E: CatalogExt> Producer<E> {
 	/// Get a snapshot of the current catalog.
 	pub fn snapshot(&self) -> Catalog<E> {
 		self.current.lock().unwrap().clone()
+	}
+
+	/// A handle for one importer to publish a video rendition, retired on drop.
+	///
+	/// See [`VideoTrack`](super::VideoTrack).
+	pub fn video_track(&self, name: impl Into<String>) -> super::VideoTrack<E> {
+		super::VideoTrack::new(self.clone(), name)
+	}
+
+	/// A handle for one importer to publish an audio rendition, retired on drop.
+	///
+	/// See [`AudioTrack`](super::AudioTrack).
+	pub fn audio_track(&self, name: impl Into<String>) -> super::AudioTrack<E> {
+		super::AudioTrack::new(self.clone(), name)
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
@@ -139,12 +184,27 @@ impl<E: CatalogExt> Producer<E> {
 /// and (through the catalog's own deref) the extension sections are editable directly.
 ///
 /// On drop, the hang, compressed-hang, and MSF catalog tracks are updated if the catalog was mutated.
-pub struct Guard<'a, E: CatalogExt = Extra> {
+pub struct Guard<'a, E: CatalogExt = ()> {
 	catalog: MutexGuard<'a, Catalog<E>>,
 	hang: &'a mut moq_json::Producer<Catalog<E>>,
 	hangz: &'a mut moq_json::Producer<Catalog<E>>,
 	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
+}
+
+impl<E: CatalogExt> Deref for Guard<'_, E> {
+	type Target = Catalog<E>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.catalog
+	}
+}
+
+impl<E: CatalogExt> DerefMut for Guard<'_, E> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.updated = true;
+		&mut self.catalog
+	}
 }
 
 impl Guard<'_, Extra> {
@@ -166,21 +226,6 @@ impl Guard<'_, Extra> {
 			self.updated = true;
 		}
 		removed
-	}
-}
-
-impl<E: CatalogExt> Deref for Guard<'_, E> {
-	type Target = Catalog<E>;
-
-	fn deref(&self) -> &Self::Target {
-		&self.catalog
-	}
-}
-
-impl<E: CatalogExt> DerefMut for Guard<'_, E> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.updated = true;
-		&mut self.catalog
 	}
 }
 
@@ -258,7 +303,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		track.alt_group = if has_multiple_video { Some(1) } else { None };
 		track.max_grp_sap_starting_type = sap_type;
 		track.max_obj_sap_starting_type = sap_type;
-		track.jitter = config.jitter.map(|t| t.as_millis() as f64);
+		track.jitter = config.jitter.map(std::time::Duration::from);
 		tracks.push(track);
 	}
 
@@ -289,11 +334,11 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		track.alt_group = if has_multiple_audio { Some(1) } else { None };
 		track.max_grp_sap_starting_type = Some(1);
 		track.max_obj_sap_starting_type = Some(1);
-		track.jitter = config.jitter.map(|t| t.as_millis() as f64);
+		track.jitter = config.jitter.map(std::time::Duration::from);
 		tracks.push(track);
 	}
 
-	moq_msf::Catalog { version: 1, tracks }
+	moq_msf::Catalog { tracks }
 }
 
 #[cfg(test)]
@@ -378,7 +423,6 @@ mod test {
 
 		let msf = to_msf(&catalog);
 
-		assert_eq!(msf.version, 1);
 		assert_eq!(msf.tracks.len(), 2);
 
 		let video = &msf.tracks[0];
@@ -444,7 +488,6 @@ mod test {
 	fn convert_empty() {
 		let catalog = hang::Catalog::default();
 		let msf = to_msf(&catalog);
-		assert_eq!(msf.version, 1);
 		assert!(msf.tracks.is_empty());
 	}
 
@@ -498,14 +541,14 @@ mod test {
 		video_config.coded_height = Some(720);
 		video_config.framerate = Some(30.0);
 		video_config.container = Container::Legacy;
-		video_config.jitter = Some(moq_net::Time::from_millis_unchecked(100));
+		video_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(100)).unwrap());
 
 		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert("video0".to_string(), video_config);
 
 		let mut audio_config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		audio_config.container = Container::Legacy;
-		audio_config.jitter = Some(moq_net::Time::from_millis_unchecked(40));
+		audio_config.jitter = Some(moq_net::Time::try_from(std::time::Duration::from_millis(40)).unwrap());
 
 		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert("audio0".to_string(), audio_config);
@@ -529,13 +572,13 @@ mod test {
 		// H.264 may carry B-frames, so SAP starting type is 2.
 		assert_eq!(video.max_grp_sap_starting_type, Some(2));
 		assert_eq!(video.max_obj_sap_starting_type, Some(2));
-		assert_eq!(video.jitter, Some(100.0));
+		assert_eq!(video.jitter, Some(std::time::Duration::from_millis(100)));
 
 		let audio = &msf.tracks[1];
 		assert_eq!(audio.role, Some(moq_msf::Role::Audio));
 		assert_eq!(audio.max_grp_sap_starting_type, Some(1));
 		assert_eq!(audio.max_obj_sap_starting_type, Some(1));
-		assert_eq!(audio.jitter, Some(40.0));
+		assert_eq!(audio.jitter, Some(std::time::Duration::from_millis(40)));
 	}
 
 	#[test]

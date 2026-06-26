@@ -1,6 +1,6 @@
 use std::task::{Poll, ready};
 
-use super::{Catalog, CatalogExt, Extra};
+use super::{Catalog, CatalogExt};
 use crate::Result;
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
@@ -8,23 +8,14 @@ use crate::Result;
 /// This wraps a [`moq_json::Consumer`], reconstructing the JSON catalog from the latest
 /// group's snapshot (plus any future deltas) to discover available audio and video tracks.
 ///
-/// Generic over the application extension `E` (defaulting to [`Extra`](super::Extra), the
-/// untyped JSON passthrough); yields a [`Catalog<E>`](super::Catalog).
-pub struct Consumer<E: CatalogExt = Extra> {
+/// Generic over the application extension `E` (defaulting to `()`); yields a
+/// [`Catalog<E>`](super::Catalog).
+pub struct Consumer<E: CatalogExt = ()> {
 	inner: moq_json::Consumer<Catalog<E>>,
 }
 
-// Manual Clone so a consumer is cheaply clonable regardless of whether `E` is.
-impl<E: CatalogExt> Clone for Consumer<E> {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-		}
-	}
-}
-
 impl<E: CatalogExt> Consumer<E> {
-	/// Create a new catalog consumer from a MoQ track consumer (uncompressed `catalog.json`).
+	/// Create a new catalog consumer from a MoQ track subscriber (uncompressed `catalog.json`).
 	pub fn new(track: moq_net::TrackConsumer) -> Self {
 		Self {
 			inner: moq_json::Consumer::new(track, moq_json::ConsumerConfig::default()),
@@ -72,6 +63,15 @@ mod test {
 
 	use super::*;
 
+	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
+	/// born from their broadcast (no public `TrackProducer::new`).
+	fn track_producer(name: impl Into<String>) -> moq_net::TrackProducer {
+		moq_net::Broadcast::new()
+			.produce()
+			.create_track(moq_net::Track::new(name))
+			.unwrap()
+	}
+
 	// Build a base catalog distinguished by an audio rendition named `name`, plus its JSON payload.
 	fn catalog_payload(name: &str) -> (Catalog, String) {
 		let mut catalog = Catalog::default();
@@ -92,7 +92,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -108,7 +108,7 @@ mod test {
 
 	#[test]
 	fn waits_for_pending_catalog_group_payload_after_track_finish() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer = Consumer::new(track.consume());
 		let mut group = track.append_group().expect("catalog group should append");
 
@@ -126,7 +126,7 @@ mod test {
 
 	#[test]
 	fn returns_latest_complete_catalog_group() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -152,7 +152,7 @@ mod test {
 
 	#[test]
 	fn waits_for_newer_pending_group_instead_of_returning_older_ready_group() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -179,7 +179,7 @@ mod test {
 
 	#[test]
 	fn retained_pending_group_is_superseded_by_newer_group() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 
@@ -209,7 +209,7 @@ mod test {
 
 	#[test]
 	fn returns_none_when_empty_track_finishes() {
-		let mut track = hang::Catalog::default_track().produce();
+		let mut track = track_producer(hang::Catalog::DEFAULT_NAME);
 		let mut consumer: Consumer = Consumer::new(track.consume());
 		let waiter = kio::Waiter::noop();
 

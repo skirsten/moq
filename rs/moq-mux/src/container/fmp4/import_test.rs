@@ -19,9 +19,9 @@ fn run_fmp4(data: &[u8]) -> crate::catalog::hang::Catalog {
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.clone());
 
-	let mut buf = bytes::BytesMut::from(data);
+	let buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
-	let _ = fmp4.decode(&mut buf);
+	let _ = fmp4.decode(&buf);
 
 	catalog.snapshot()
 }
@@ -177,18 +177,17 @@ async fn test_seek_sets_initial_sequence() {
 	}
 
 	// Decode init so the tracks exist, then seek, then decode the fragments.
-	fmp4.decode(&mut init_buf).unwrap();
-	assert!(fmp4.is_initialized());
+	fmp4.decode(&init_buf).unwrap();
 
 	let snap = catalog.snapshot();
 	let video_name = snap.video.renditions.keys().next().expect("video track").clone();
 	let mut video_track = broadcast_consumer
-		.subscribe_track(&moq_net::Track::new(&video_name))
+		.subscribe_track(&moq_net::Track::new(video_name.as_str()))
 		.expect("video track should exist");
 
 	fmp4.seek(100).unwrap();
 	// Trailing partial fragments may error; ignore.
-	let _ = fmp4.decode(&mut frag_buf);
+	let _ = fmp4.decode(&frag_buf);
 	fmp4.finish().unwrap();
 
 	let sequences = drain_group_sequences(&mut video_track);
@@ -209,16 +208,16 @@ async fn test_seek_sets_initial_sequence() {
 #[tokio::test]
 async fn test_msf_catalog_roundtrip() {
 	let mut broadcast = moq_net::Broadcast::new().produce();
-	// Take the consumer before adding tracks; subscribe_track is called after the
+	// Take the consumer before adding tracks; track() is called after the
 	// MSF catalog track has been created by `catalog::Producer::new`.
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog);
 
 	let data = include_bytes!("test_data/bbb.mp4");
-	let mut buf = bytes::BytesMut::from(&data[..]);
+	let buf = bytes::BytesMut::from(&data[..]);
 	// Trailing fragments may error out (e.g. partial mdat); ignore.
-	let _ = fmp4.decode(&mut buf);
+	let _ = fmp4.decode(&buf);
 
 	let track = consumer
 		.subscribe_track(&moq_net::Track::new(moq_msf::DEFAULT_NAME))

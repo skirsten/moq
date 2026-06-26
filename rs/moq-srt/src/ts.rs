@@ -8,7 +8,6 @@
 //! it back to MPEG-TS for an SRT caller (VLC, ffmpeg) to play.
 
 use bytes::Bytes;
-use moq_mux::catalog::hang::Extra;
 use moq_mux::container::{Frame, ts};
 use moq_net::{Broadcast, OriginConsumer, OriginProducer};
 
@@ -24,7 +23,7 @@ use crate::Result;
 pub struct Publisher {
 	/// Owns a clone of the broadcast producer, so the broadcast stays announced
 	/// (and writable) for the publisher's lifetime.
-	importer: ts::Import<Extra>,
+	importer: ts::Import,
 }
 
 impl Publisher {
@@ -51,8 +50,8 @@ impl Publisher {
 	///
 	/// `decode` drains `data` fully, buffering any partial trailing packet in
 	/// its own internal scratch, so there's nothing to retain here.
-	pub fn feed(&mut self, mut data: Bytes) -> Result<()> {
-		Ok(self.importer.decode(&mut data)?)
+	pub fn feed(&mut self, data: Bytes) -> Result<()> {
+		Ok(self.importer.decode(&data)?)
 	}
 
 	/// Flush any buffered media and close out the broadcast's open groups.

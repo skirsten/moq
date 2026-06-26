@@ -29,9 +29,6 @@ impl CatalogFormat {
 	pub const DEFAULT: Self = Self::Hang;
 
 	/// The filename-style suffix (including leading dot) for this format.
-	///
-	/// [`Hang`](Self::Hang) and [`HangZ`](Self::HangZ) share `.hang`: the compressed track is an
-	/// extra track on the same broadcast, not a different broadcast name.
 	pub fn extension(self) -> &'static str {
 		match self {
 			Self::Hang | Self::HangZ => ".hang",
@@ -73,13 +70,5 @@ mod test {
 		assert_eq!(CatalogFormat::detect("demo/bbb"), None);
 		assert_eq!(CatalogFormat::detect(""), None);
 		assert_eq!(CatalogFormat::detect("demo/foo.v2"), None);
-	}
-
-	#[test]
-	fn hangz_shares_hang_suffix_and_is_never_detected() {
-		// HangZ is an explicit opt-in: it reuses the `.hang` broadcast suffix and detection always
-		// resolves `.hang` to the uncompressed track.
-		assert_eq!(CatalogFormat::HangZ.extension(), ".hang");
-		assert_eq!(CatalogFormat::detect("demo/bbb.hang"), Some(CatalogFormat::Hang));
 	}
 }

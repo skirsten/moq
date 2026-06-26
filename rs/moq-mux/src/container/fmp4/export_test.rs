@@ -24,7 +24,9 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".avc3").unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")))
+		.unwrap();
 	let mut config = VideoConfig::new(H264 {
 		profile: 0x42,
 		constraints: 0xc0,
@@ -34,7 +36,7 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	const SC: &[u8] = &[0, 0, 0, 1];
 	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
@@ -54,11 +56,14 @@ async fn avc3_source_to_cmaf_export_roundtrip() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: keyframe_payload,
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -119,7 +124,9 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".aac").unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".aac")))
+		.unwrap();
 
 	// AAC-LC (profile 2), 44100 Hz, stereo. The TS importer sets `description`
 	// via aac::Config::encode; mirror that here.
@@ -132,19 +139,21 @@ async fn legacy_aac_source_to_cmaf_export_synthesizes_esds() {
 	let mut config = AudioConfig::new(AAC { profile: 2 }, 44100, 2);
 	config.description = Some(description.clone());
 	config.container = Container::Legacy;
-	catalog.lock().audio.renditions.insert(track.name.clone(), config);
+	catalog.lock().audio.renditions.insert(track.name().to_string(), config);
 
 	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer
 		.write(crate::container::Frame {
 			timestamp: Timestamp::from_micros(0).unwrap(),
+			duration: None,
 			payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
 			keyframe: true,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -205,12 +214,14 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".vp8").unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".vp8")))
+		.unwrap();
 	let mut config = VideoConfig::new(VideoCodec::VP8);
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer
@@ -218,11 +229,14 @@ async fn vp8_source_to_cmaf_export_synthesizes_vp08() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: Bytes::from_static(&[0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a]),
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -274,7 +288,9 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	let consumer = producer.consume();
 
 	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
-	let track = producer.unique_track(".vp9").unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".vp9")))
+		.unwrap();
 	let mut config = VideoConfig::new(VP9 {
 		profile: 0,
 		level: 20,
@@ -288,7 +304,7 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	config.coded_width = Some(320);
 	config.coded_height = Some(240);
 	config.container = Container::Legacy;
-	catalog.lock().video.renditions.insert(track.name.clone(), config);
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
 
 	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
 	track_producer
@@ -296,11 +312,14 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 			timestamp: Timestamp::from_micros(0).unwrap(),
 			payload: Bytes::from_static(&[0x82, 0x49, 0x83, 0x42]),
 			keyframe: true,
+			duration: None,
 		})
 		.unwrap();
 	track_producer.finish().unwrap();
 
-	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -339,6 +358,105 @@ async fn vp9_source_to_cmaf_export_synthesizes_vp09() {
 	moov.encode(&mut buf).expect("encode synthesized moov");
 }
 
+/// AV1 source (catalog `Container::Legacy`, codec `av01`, no `description`) →
+/// fMP4 export must synthesize an `av01` sample entry whose `av1C` round-trips
+/// the catalog's AV1 parameters. AV1 publishes its sequence header in-band
+/// (like `hev1`/`avc3`), so there is no out-of-band config and `config_obus`
+/// stays empty.
+#[tokio::test(start_paused = true)]
+async fn av1_source_to_cmaf_export_synthesizes_av01() {
+	use crate::container::Timestamp;
+	use bytes::Bytes;
+	use hang::catalog::{AV1, Container, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".av01")))
+		.unwrap();
+	let mut config = VideoConfig::new(AV1 {
+		profile: 0,
+		level: 8,
+		tier: 'M',
+		bitdepth: 10,
+		mono_chrome: false,
+		chroma_subsampling_x: true,
+		chroma_subsampling_y: true,
+		chroma_sample_position: 2,
+		color_primaries: 9,
+		transfer_characteristics: 16,
+		matrix_coefficients: 9,
+		full_range: false,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	track_producer
+		.write(crate::container::Frame {
+			timestamp: Timestamp::from_micros(0).unwrap(),
+			payload: Bytes::from_static(&[0x12, 0x00, 0x0a, 0x0b]),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
+
+	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init bytes");
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
+
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut moov: Option<mp4_atom::Moov> = None;
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(m) = atom {
+			moov = Some(m);
+		}
+	}
+	let moov = moov.expect("init segment missing moov");
+	assert_eq!(moov.trak.len(), 1, "expected single track in moov");
+
+	let trak = &moov.trak[0];
+	let stsd = &trak.mdia.minf.stbl.stsd;
+	assert_eq!(stsd.codecs.len(), 1, "expected single sample entry");
+	let av01 = match &stsd.codecs[0] {
+		mp4_atom::Codec::Av01(av01) => av01,
+		other => panic!("expected Av01 sample entry, got {:?}", other),
+	};
+	assert_eq!(av01.visual.width, 320);
+	assert_eq!(av01.visual.height, 240);
+
+	let av1c = &av01.av1c;
+	assert_eq!(av1c.seq_profile, 0);
+	assert_eq!(av1c.seq_level_idx_0, 8);
+	assert!(!av1c.seq_tier_0, "Main tier");
+	assert!(av1c.high_bitdepth, "10-bit");
+	assert!(!av1c.twelve_bit);
+	assert!(av1c.chroma_subsampling_x);
+	assert!(av1c.chroma_subsampling_y);
+	assert_eq!(av1c.chroma_sample_position, 2);
+	assert!(av1c.config_obus.is_empty(), "sequence header stays in-band");
+
+	// The synthesized init (av1C included) must round-trip through encode.
+	let mut buf = Vec::new();
+	moov.encode(&mut buf).expect("encode synthesized moov");
+}
+
 /// CMAF source (catalog `Container::Cmaf`) → fMP4 export should keep using
 /// the passthrough init path: existing init bytes are merged into the moov.
 ///
@@ -353,10 +471,12 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 
 	let catalog = crate::catalog::Producer::new(&mut producer).unwrap();
 	let mut importer = crate::container::fmp4::Import::new(producer, catalog);
-	let mut buf = BytesMut::from(data.as_slice());
-	let _ = importer.decode(&mut buf);
+	let buf = BytesMut::from(data.as_slice());
+	let _ = importer.decode(&buf);
 
-	let mut exporter = crate::container::fmp4::Export::new(consumer).expect("new Fmp4");
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(consumer, catalog_stream);
 
 	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
@@ -386,4 +506,108 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 	// Sanity check: the merged moov must round-trip cleanly through encode.
 	let mut buf = Vec::new();
 	moov.encode(&mut buf).expect("encode merged moov");
+}
+
+/// `next_fragment` reports the init flag, per-fragment sync-sample independence,
+/// and a positive duration. With a sub-GOP fragment cap, a part in the middle of
+/// a GOP is reported as non-independent while the GOP's leading part stays
+/// independent. This is the metadata an HLS/LL-HLS packager consumes.
+#[tokio::test(start_paused = true)]
+async fn next_fragment_reports_segment_metadata() {
+	use std::time::Duration;
+
+	use crate::container::Timestamp;
+	use bytes::BytesMut;
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let broadcast = moq_net::Broadcast::new();
+	let mut producer = broadcast.produce();
+	let consumer = producer.consume();
+
+	let mut catalog = crate::catalog::Producer::new(&mut producer).unwrap();
+	let track = producer
+		.create_track(moq_net::Track::new(producer.unique_name(".avc3")))
+		.unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	config.coded_width = Some(320);
+	config.coded_height = Some(240);
+	config.framerate = Some(30.0);
+	config.container = Container::Legacy;
+	catalog.lock().video.renditions.insert(track.name().to_string(), config);
+
+	const SC: &[u8] = &[0, 0, 0, 1];
+	let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
+	let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
+	let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
+	let slice = &[0x41u8, 0x9a, 0x00, 0x01][..];
+
+	let annexb = |nals: &[&[u8]]| {
+		let mut buf = BytesMut::new();
+		for nal in nals {
+			buf.extend_from_slice(SC);
+			buf.extend_from_slice(nal);
+		}
+		buf.freeze()
+	};
+
+	let frame = |timestamp_us: u64, payload, keyframe| crate::container::Frame {
+		timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+		payload,
+		keyframe,
+		duration: None,
+	};
+
+	let mut track_producer = crate::container::Producer::new(track, crate::catalog::hang::Container::Legacy);
+	// GOP 0: keyframe@0 (SPS+PPS+IDR), delta@33ms. GOP 1: keyframe@66ms.
+	track_producer.write(frame(0, annexb(&[sps, pps, idr]), true)).unwrap();
+	track_producer.write(frame(33_000, annexb(&[slice]), false)).unwrap();
+	track_producer
+		.write(frame(66_000, annexb(&[sps, pps, idr]), true))
+		.unwrap();
+	track_producer.finish().unwrap();
+
+	let catalog_stream =
+		crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang).expect("catalog consumer");
+	// Sub-GOP cap so GOP 0 splits into two parts (the trailing part non-independent).
+	let mut exporter =
+		crate::container::fmp4::Export::new(consumer, catalog_stream).with_fragment_duration(Duration::from_millis(20));
+
+	// First emit is the init segment.
+	let init = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+		.await
+		.expect("exporter timed out")
+		.expect("exporter result")
+		.expect("expected init fragment");
+	assert!(init.init, "first fragment must be the init segment");
+	assert!(!init.independent);
+	assert_eq!(init.duration, 0.0);
+
+	// The track is finished, so its three media fragments are all available. Keep
+	// the broadcast/catalog producers alive (dropping them aborts the consumer);
+	// the catalog stays open, so the exporter never reaches a clean end — read the
+	// known fragment count rather than looping to `None`.
+	let mut independents = Vec::new();
+	for _ in 0..3 {
+		let frag = tokio::time::timeout(Duration::from_secs(1), exporter.next_fragment())
+			.await
+			.expect("exporter timed out")
+			.expect("exporter result")
+			.expect("expected a media fragment");
+		assert!(!frag.init);
+		assert!(frag.duration > 0.0, "media fragment duration should be positive");
+		independents.push(frag.independent);
+	}
+
+	// GOP 0 leading part (independent), GOP 0 trailing part (dependent),
+	// GOP 1 leading part (independent).
+	assert_eq!(independents, vec![true, false, true]);
+
+	drop(track_producer);
+	drop(catalog);
+	drop(producer);
 }

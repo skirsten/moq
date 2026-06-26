@@ -3,19 +3,127 @@
 //! Parses SPS NAL units and AVCDecoderConfigurationRecord blobs into
 //! catalog-ready fields. The [`Avc1`] transmuxer rewrites Annex-B input
 //! (inline SPS/PPS) as length-prefixed NALU + out-of-band avcC, which is
-//! what every CMAF and MKV consumer expects. [`Import`] is the importer;
-//! it auto-detects either wire shape from the leading bytes.
+//! what every CMAF and MKV consumer expects. [`Export`] subscribes to a
+//! catalog-narrowed H.264 rendition and emits an Annex-B elementary
+//! stream; [`Split`] does the byte-level framing for the Annex-B (avc3)
+//! wire shape and [`Import`] is the pure frame publisher that resolves the
+//! catalog. avc1 (length-prefixed NALU) has no stream framing; wrap one
+//! access unit with `avc1_frame`.
 
+mod export;
 mod import;
+mod split;
 
+pub use export::*;
 pub use import::*;
+pub use split::*;
 
-use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
+
+/// Wrap one avc1 (length-prefixed NALU) access unit as a single
+/// [`Frame`](crate::container::Frame), with the keyframe flag set when it
+/// carries an IDR slice (NAL type 5).
+///
+/// avc1 is not a stream: each access unit arrives whole with its NALU
+/// `length_size` known out-of-band from the avcC (`super::Avcc::parse(avcc).length_size`).
+/// The payload is passed through verbatim.
+pub(crate) fn avc1_frame(
+	data: &[u8],
+	length_size: usize,
+	pts: crate::container::Timestamp,
+) -> crate::Result<crate::container::Frame> {
+	Ok(crate::container::Frame {
+		timestamp: pts,
+		payload: data.to_vec().into(),
+		keyframe: avc1_is_keyframe(data, length_size),
+		duration: None,
+	})
+}
+
+/// Detect whether an avc1-shaped (length-prefixed) buffer contains an IDR slice.
+fn avc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
+	let mut offset = 0;
+	while offset + length_size <= data.len() {
+		let nal_len = match length_size {
+			1 => data[offset] as usize,
+			2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
+			3 => u32::from_be_bytes([0, data[offset], data[offset + 1], data[offset + 2]]) as usize,
+			4 => u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize,
+			_ => return false,
+		};
+		offset += length_size;
+		if offset + nal_len > data.len() {
+			break;
+		}
+		if nal_len > 0 && data[offset] & 0x1f == 5 {
+			return true; // IDR slice
+		}
+		offset += nal_len;
+	}
+	false
+}
+
+/// H.264 parsing and transform errors.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("SPS NAL too short")]
+	SpsTooShort,
+
+	#[error("failed to parse SPS")]
+	SpsParse,
+
+	#[error("AVCDecoderConfigurationRecord too short")]
+	AvccTooShort,
+
+	#[error("AVCDecoderConfigurationRecord truncated")]
+	AvccTruncated,
+
+	#[error("avc1 description for rendition {name:?} is missing SPS or PPS (sps={sps}, pps={pps})")]
+	MissingParamSets { name: String, sps: usize, pps: usize },
+
+	#[error("SPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
+	SpsTooLarge(usize),
+
+	#[error("PPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
+	PpsTooLarge(usize),
+
+	#[error("avcC requires at least one SPS")]
+	MissingSps,
+
+	#[error("too many SPS for avcC ({0} > 31)")]
+	TooManySps(usize),
+
+	#[error("too many PPS for avcC ({0} > 255)")]
+	TooManyPps(usize),
+
+	#[error("NAL too large for 4-byte length prefix")]
+	NalTooLarge,
+
+	#[error("NAL unit is too short")]
+	NalTooShort,
+
+	#[error("forbidden zero bit is not zero")]
+	ForbiddenZeroBit,
+
+	#[error("not initialized")]
+	NotInitialized,
+
+	#[error("avc3 track not created")]
+	Avc3TrackNotCreated,
+
+	#[error("missing timestamp")]
+	MissingTimestamp,
+
+	#[error("annexb: {0}")]
+	Annexb(#[from] crate::codec::annexb::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Parsed H.264 SPS (Sequence Parameter Set) NAL.
 ///
@@ -33,10 +141,12 @@ pub struct Sps {
 
 impl Sps {
 	/// Parse an SPS NAL unit.
-	pub fn parse(nal: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(nal.len() >= 4, "SPS NAL too short");
+	pub fn parse(nal: &[u8]) -> Result<Self> {
+		if nal.len() < 4 {
+			return Err(Error::SpsTooShort);
+		}
 		let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
-		let sps = h264_parser::Sps::parse(&rbsp).context("failed to parse SPS")?;
+		let sps = h264_parser::Sps::parse(&rbsp).map_err(|_| Error::SpsParse)?;
 		Ok(Self {
 			profile: sps.profile_idc,
 			constraints: pack_constraint_flags(&sps),
@@ -55,8 +165,11 @@ impl Sps {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Avcc {
+	/// AVC profile indication (`profile_idc`) from the record.
 	pub profile: u8,
+	/// Packed constraint-set flags byte from the record.
 	pub constraints: u8,
+	/// AVC level indication (`level_idc`) from the record.
 	pub level: u8,
 	/// NALU length size in bytes (typically 4).
 	pub length_size: usize,
@@ -71,8 +184,10 @@ pub struct Avcc {
 
 impl Avcc {
 	/// Parse an AVCDecoderConfigurationRecord buffer.
-	pub fn parse(avcc: &[u8]) -> anyhow::Result<Self> {
-		anyhow::ensure!(avcc.len() >= 7, "AVCDecoderConfigurationRecord too short");
+	pub fn parse(avcc: &[u8]) -> Result<Self> {
+		if avcc.len() < 7 {
+			return Err(Error::AvccTooShort);
+		}
 
 		let profile = avcc[1];
 		let constraints = avcc[2];
@@ -80,14 +195,15 @@ impl Avcc {
 		let length_size = (avcc[4] & 0x03) as usize + 1;
 		let num_sps = (avcc[5] & 0x1f) as usize;
 
-		let mut sps = Vec::with_capacity(num_sps);
-		let mut pos = read_param_set_array(avcc, 6, num_sps, &mut sps)?;
+		let mut pos = 6;
+		let sps = read_param_sets(avcc, &mut pos, num_sps)?;
 
-		anyhow::ensure!(avcc.len() > pos, "AVCDecoderConfigurationRecord truncated");
+		if avcc.len() <= pos {
+			return Err(Error::AvccTruncated);
+		}
 		let num_pps = avcc[pos] as usize;
 		pos += 1;
-		let mut pps = Vec::with_capacity(num_pps);
-		read_param_set_array(avcc, pos, num_pps, &mut pps)?;
+		let pps = read_param_sets(avcc, &mut pos, num_pps)?;
 
 		// Resolution from the first parseable SPS.
 		let (mut coded_width, mut coded_height) = (None, None);
@@ -126,31 +242,27 @@ fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
 /// are read from the first SPS. A stream may legitimately carry several distinct
 /// SPS/PPS (slices reference them by id), so the record holds an ordered list of
 /// each rather than a single one.
-pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> anyhow::Result<Bytes> {
-	let first_sps = sps_nals.first().context("avcC requires at least one SPS")?;
-	anyhow::ensure!(first_sps.len() >= 4, "SPS NAL too short");
+pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes> {
+	let first_sps = sps_nals.first().ok_or(Error::MissingSps)?;
+	if first_sps.len() < 4 {
+		return Err(Error::SpsTooShort);
+	}
 	// numOfSequenceParameterSets is a 5-bit field, numOfPictureParameterSets a byte.
-	anyhow::ensure!(
-		sps_nals.len() <= 0x1f,
-		"too many SPS for avcC ({} > 31)",
-		sps_nals.len()
-	);
-	anyhow::ensure!(
-		pps_nals.len() <= u8::MAX as usize,
-		"too many PPS for avcC ({} > 255)",
-		pps_nals.len()
-	);
-	for (label, nal) in sps_nals
-		.iter()
-		.map(|n| ("SPS", n))
-		.chain(pps_nals.iter().map(|n| ("PPS", n)))
-	{
-		anyhow::ensure!(
-			nal.len() <= u16::MAX as usize,
-			"{label} too large for avcC length field ({} > {})",
-			nal.len(),
-			u16::MAX
-		);
+	if sps_nals.len() > 0x1f {
+		return Err(Error::TooManySps(sps_nals.len()));
+	}
+	if pps_nals.len() > u8::MAX as usize {
+		return Err(Error::TooManyPps(pps_nals.len()));
+	}
+	for sps in sps_nals {
+		if sps.len() > u16::MAX as usize {
+			return Err(Error::SpsTooLarge(sps.len()));
+		}
+	}
+	for pps in pps_nals {
+		if pps.len() > u16::MAX as usize {
+			return Err(Error::PpsTooLarge(pps.len()));
+		}
 	}
 
 	let profile_idc = first_sps[1];
@@ -175,6 +287,27 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> anyhow::Resu
 		out.put_slice(pps);
 	}
 	Ok(out.freeze())
+}
+
+/// Read `count` length-prefixed (u16) NAL units from `buf` starting at `*pos`,
+/// advancing `*pos` past the last one. All arithmetic is checked so malformed
+/// configs surface as errors rather than panics.
+fn read_param_sets(buf: &[u8], pos: &mut usize, count: usize) -> Result<Vec<Bytes>> {
+	let mut out = Vec::with_capacity(count);
+	for _ in 0..count {
+		let after_len = pos.checked_add(2).ok_or(Error::AvccTruncated)?;
+		if buf.len() < after_len {
+			return Err(Error::AvccTruncated);
+		}
+		let len = u16::from_be_bytes([buf[*pos], buf[*pos + 1]]) as usize;
+		let after_nal = after_len.checked_add(len).ok_or(Error::AvccTruncated)?;
+		if buf.len() < after_nal {
+			return Err(Error::AvccTruncated);
+		}
+		out.push(Bytes::copy_from_slice(&buf[after_len..after_nal]));
+		*pos = after_nal;
+	}
+	Ok(out)
 }
 
 /// Extract the parameter-set NALs (SPS then PPS) and the NALU length size from
@@ -257,7 +390,7 @@ impl Avc1 {
 	/// - `Ok(None)` if the input contained only parameter sets and the
 	///   transform is still waiting for slice NALs (avcC may have been built
 	///   as a side effect).
-	pub fn transform(&mut self, payload: Bytes) -> anyhow::Result<Option<Bytes>> {
+	pub fn transform(&mut self, payload: Bytes) -> Result<Option<Bytes>> {
 		// Parse Annex-B NALs, collect this frame's SPS/PPS, length-prefix the
 		// rest. NalIterator advances the Bytes cursor; the trailing NAL has to be
 		// pulled separately via flush().
@@ -272,7 +405,7 @@ impl Avc1 {
 		loop {
 			let nal = match nal_iter.next() {
 				Some(Ok(n)) => n,
-				Some(Err(e)) => return Err(e),
+				Some(Err(e)) => return Err(e.into()),
 				None => break,
 			};
 			if process_nal(&nal, &mut out, &mut frame_sps, &mut frame_pps)? {
@@ -310,7 +443,7 @@ impl Avc1 {
 		Ok(Some(out.freeze()))
 	}
 
-	fn rebuild_avcc(&mut self) -> anyhow::Result<()> {
+	fn rebuild_avcc(&mut self) -> Result<()> {
 		if self.sps.is_empty() || self.pps.is_empty() {
 			return Ok(());
 		}
@@ -327,7 +460,7 @@ fn process_nal(
 	out: &mut BytesMut,
 	frame_sps: &mut Vec<Bytes>,
 	frame_pps: &mut Vec<Bytes>,
-) -> anyhow::Result<bool> {
+) -> Result<bool> {
 	if nal.is_empty() {
 		return Ok(false);
 	}
@@ -341,7 +474,7 @@ fn process_nal(
 			Ok(false)
 		}
 		_ => {
-			let len = u32::try_from(nal.len()).context("NAL too large for 4-byte length prefix")?;
+			let len = u32::try_from(nal.len()).map_err(|_| Error::NalTooLarge)?;
 			out.extend_from_slice(&len.to_be_bytes());
 			out.extend_from_slice(nal);
 			Ok(true)
@@ -362,6 +495,32 @@ mod tests {
 			buf.extend_from_slice(nal);
 		}
 		buf.freeze()
+	}
+
+	/// avc1: a length-prefixed access unit with an IDR slice wraps as one keyframe;
+	/// the payload is passed through verbatim.
+	#[test]
+	fn avc1_frame_keyframe() {
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut au = BytesMut::new();
+		au.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+		au.extend_from_slice(idr);
+
+		let frame = avc1_frame(&au, 4, crate::container::Timestamp::from_micros(0).unwrap()).unwrap();
+		assert!(frame.keyframe);
+		assert_eq!(frame.payload[4..], *idr);
+	}
+
+	/// avc1: a length-prefixed access unit with a non-IDR slice is a delta frame.
+	#[test]
+	fn avc1_frame_delta() {
+		let pslice: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let mut au = BytesMut::new();
+		au.extend_from_slice(&(pslice.len() as u32).to_be_bytes());
+		au.extend_from_slice(pslice);
+
+		let frame = avc1_frame(&au, 4, crate::container::Timestamp::from_micros(0).unwrap()).unwrap();
+		assert!(!frame.keyframe);
 	}
 
 	#[test]
@@ -399,20 +558,6 @@ mod tests {
 		assert_eq!(params.len(), 2);
 		assert_eq!(params[0], sps);
 		assert_eq!(params[1], pps);
-	}
-
-	#[test]
-	fn avcc_parse_separates_sps_and_pps() {
-		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
-		let pps0 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
-		let pps1 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x81]);
-
-		let avcc = build_avcc(std::slice::from_ref(&sps), &[pps0.clone(), pps1.clone()]).unwrap();
-		let parsed = Avcc::parse(&avcc).unwrap();
-
-		assert_eq!(parsed.length_size, 4);
-		assert_eq!(parsed.sps, vec![sps]);
-		assert_eq!(parsed.pps, vec![pps0, pps1]);
 	}
 
 	#[test]

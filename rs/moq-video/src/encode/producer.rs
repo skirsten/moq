@@ -25,27 +25,32 @@ const DEFAULT_FRAMERATE: u32 = 30;
 /// trigger capture on demand. `moq_mux::codec::h264::Import` handles
 /// catalog registration and framing.
 pub struct Producer {
-	import: moq_mux::codec::h264::Import<moq_mux::catalog::hang::Extra>,
+	split: moq_mux::codec::h264::Split,
+	import: moq_mux::codec::h264::Import,
 }
 
 impl Producer {
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
-		let import =
-			moq_mux::codec::h264::Import::new(broadcast, catalog).with_mode(moq_mux::codec::h264::Mode::Avc3)?;
-		Ok(Self { import })
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: moq_mux::catalog::Producer) -> Result<Self, Error> {
+		let track = moq_mux::import::unique_track(&mut broadcast, ".avc3")?;
+		let import = moq_mux::codec::h264::Import::new(track, catalog);
+		let split = moq_mux::codec::h264::Split::new();
+		Ok(Self { split, import })
 	}
 
-	/// The underlying track producer, eagerly created by avc3 mode. Clone it
-	/// to watch subscription state via [`used`](moq_net::TrackProducer::used) /
-	/// [`unused`](moq_net::TrackProducer::unused).
-	pub fn track(&self) -> Option<&moq_net::TrackProducer> {
-		self.import.track()
+	/// A watch-only handle to the track's subscriber demand, created eagerly so
+	/// subscription state is observable before any frames arrive. Watch it via
+	/// [`used`](moq_net::TrackDemand::used) / [`unused`](moq_net::TrackDemand::unused).
+	pub fn demand(&self) -> moq_net::TrackDemand {
+		self.import.demand()
 	}
 
 	/// Publish already-encoded Annex-B packets at the given timestamp.
 	pub fn publish(&mut self, packets: Vec<bytes::Bytes>, timestamp: Timestamp) -> Result<(), Error> {
-		for mut packet in packets {
-			self.import.decode_frame(&mut packet, Some(timestamp))?;
+		for packet in packets {
+			// The encoder emits one whole access unit per packet, so flush to emit it.
+			let mut frames = self.split.decode(&packet, Some(timestamp))?;
+			frames.extend(self.split.flush(Some(timestamp))?);
+			self.import.decode(frames)?;
 		}
 		Ok(())
 	}
@@ -94,14 +99,11 @@ pub async fn publish_capture(
 	}
 
 	let producer = Producer::new(broadcast, catalog)?;
-	let track = producer
-		.track()
-		.cloned()
-		.ok_or_else(|| Error::Codec(anyhow::anyhow!("avc3 track was not created")))?;
+	let demand = producer.demand();
 
 	let gate = Gate::new();
 
-	// ffmpeg capture + encode is blocking; keep it off the async runtime.
+	// Camera capture + encode is blocking; keep it off the async runtime.
 	let worker_gate = gate.clone();
 	let mut worker = tokio::task::spawn_blocking(move || capture_loop(producer, capture, encode, worker_gate, clock));
 
@@ -109,7 +111,7 @@ pub async fn publish_capture(
 		// Surface a capture/encode failure (e.g. camera open) promptly.
 		res = &mut worker => res.map_err(|e| Error::Codec(anyhow::anyhow!("capture task: {e}")))?,
 		// The broadcast was dropped: stop the worker and wait for it to flush.
-		() = monitor_demand(&track, &gate) => {
+		() = monitor_demand(&demand, &gate) => {
 			gate.close();
 			worker
 				.await
@@ -120,13 +122,13 @@ pub async fn publish_capture(
 
 /// Toggle the gate as viewers subscribe and unsubscribe. Returns once the
 /// track stops being announced (broadcast dropped / aborted).
-async fn monitor_demand(track: &moq_net::TrackProducer, gate: &Gate) {
+async fn monitor_demand(demand: &moq_net::TrackDemand, gate: &Gate) {
 	loop {
-		match track.used().await {
+		match demand.used().await {
 			Ok(()) => gate.set_active(true),
 			Err(err) => return log_track_ended(err),
 		}
-		match track.unused().await {
+		match demand.unused().await {
 			Ok(()) => gate.set_active(false),
 			Err(err) => return log_track_ended(err),
 		}

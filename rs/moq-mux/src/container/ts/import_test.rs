@@ -11,8 +11,8 @@ fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	let mut buf = BytesMut::from(data);
-	import.decode(&mut buf).unwrap();
+	let buf = BytesMut::from(data);
+	import.decode(&buf).unwrap();
 	import.finish().unwrap();
 
 	catalog.snapshot()
@@ -194,7 +194,7 @@ fn resyncs_across_chunk_boundaries() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	for chunk in misaligned.chunks(100) {
-		import.decode(&mut BytesMut::from(chunk)).unwrap();
+		import.decode(&BytesMut::from(chunk)).unwrap();
 	}
 	import.finish().unwrap();
 
@@ -220,8 +220,8 @@ async fn import_export_import_roundtrip() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
-	let mut buf = BytesMut::from(&data[..]);
-	import.decode(&mut buf).unwrap();
+	let buf = BytesMut::from(&data[..]);
+	import.decode(&buf).unwrap();
 	import.finish().unwrap();
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
@@ -268,7 +268,7 @@ async fn survives_midstream_join() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	import
-		.decode(&mut BytesMut::from(&buf[..]))
+		.decode(&BytesMut::from(&buf[..]))
 		.expect("a mid-stream join must not abort the demux");
 	import.finish().unwrap();
 
@@ -278,7 +278,7 @@ async fn survives_midstream_join() {
 
 	// The track resumes at the keyframe: the leading delta was dropped, the IDR
 	// anchors the one and only group.
-	let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
+	let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut frames = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -307,7 +307,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 	import
-		.decode(&mut BytesMut::from(&data[..]))
+		.decode(&BytesMut::from(&data[..]))
 		.expect("a dirty mid-stream join must not abort the demux");
 	import.finish().unwrap();
 
@@ -322,7 +322,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		.find(|(_, t)| t.verbatim.as_ref().is_some_and(|v| v.stream_type == 0x86))
 		.map(|(name, _)| name.clone())
 		.expect("scte35 track");
-	let track = consumer.subscribe_track(&moq_net::Track::new(name)).unwrap();
+	let track = consumer.subscribe_track(&moq_net::Track::new(name.as_str())).unwrap();
 	let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy);
 	let mut cues = Vec::new();
 	while let Ok(Ok(Some(frame))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -356,8 +356,8 @@ fn import_handles_unaligned_chunks() {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.clone());
 
 	for chunk in data.chunks(100) {
-		let mut buf = BytesMut::from(chunk);
-		import.decode(&mut buf).unwrap();
+		let buf = BytesMut::from(chunk);
+		import.decode(&buf).unwrap();
 	}
 	import.finish().unwrap();
 

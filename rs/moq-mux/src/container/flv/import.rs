@@ -20,7 +20,6 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, Container, H264, VideoConfig};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{
 	AAC_RAW, AAC_SEQUENCE_HEADER, AUDIO_FORMAT_AAC, AUDIO_FORMAT_EX, AUDIO_PACKET_CODED_FRAMES,
@@ -42,9 +41,9 @@ const MAX_DATA_OFFSET: usize = 64 * 1024;
 /// `ffmpeg -f flv`. Unsupported codecs, plus `onMetaData` script tags, are logged
 /// and dropped. A single FLV stream carries at most one video and one audio
 /// track; a new sequence header replaces the previous configuration.
-pub struct Import {
+pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::BroadcastProducer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<E>,
 
 	/// Accumulated unparsed input. Whole tags are drained out; a trailing partial
 	/// tag is retained for the next [`decode`](Self::decode) call.
@@ -69,9 +68,9 @@ struct AudioStream {
 	config: AudioConfig,
 }
 
-impl Import {
+impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Create a demuxer publishing into `broadcast` with renditions announced on `catalog`.
-	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer<E>) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -82,35 +81,11 @@ impl Import {
 		}
 	}
 
-	/// True once at least one stream's sequence header has been parsed.
-	pub fn is_initialized(&self) -> bool {
-		self.video.is_some() || self.audio.is_some()
-	}
-
-	/// Decode from an asynchronous reader, driving [`Self::decode`] in a loop.
-	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
-		let mut chunk = BytesMut::with_capacity(64 * 1024);
-		loop {
-			chunk.clear();
-			let n = reader.read_buf(&mut chunk).await?;
-			if n == 0 {
-				break;
-			}
-			self.decode(&mut chunk)?;
-		}
-		Ok(())
-	}
-
 	/// Append `buf` to the internal scratch and demux every whole tag it now
 	/// completes. The buffer is fully consumed; a trailing partial tag is retained
 	/// for the next call.
-	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		while buf.has_remaining() {
-			let chunk = buf.chunk();
-			self.buffer.extend_from_slice(chunk);
-			let len = chunk.len();
-			buf.advance(len);
-		}
+	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
+		self.buffer.extend_from_slice(data);
 
 		self.drain()
 	}
@@ -236,12 +211,7 @@ impl Import {
 					match crate::codec::vp9::config_from_keyframe(data) {
 						Ok(Some(config)) => self.init_video(config)?,
 						Ok(None) => {}
-						Err(err) => {
-							// The header didn't parse, so the frame is unusable: drop it
-							// rather than forwarding a frame we couldn't validate.
-							tracing::warn!(%err, "dropping malformed VP9 key frame");
-							return Ok(());
-						}
+						Err(err) => tracing::warn!(%err, "dropping malformed VP9 key frame"),
 					}
 				}
 
@@ -323,9 +293,8 @@ impl Import {
 		}
 	}
 
-	/// Write one decoded video sample. A leading delta before the first keyframe
-	/// (a mid-GOP join) is tolerated by the lenient-start producer rather than
-	/// aborting.
+	/// Write one decoded video sample, dropping a leading delta before the first
+	/// keyframe (a mid-GOP join) rather than aborting.
 	fn write_video(&mut self, data: &[u8], dts: u64, composition_time: i32, keyframe: bool) -> anyhow::Result<()> {
 		let Some(stream) = self.video.as_mut() else {
 			tracing::debug!("video frame before sequence header, dropping");
@@ -334,12 +303,15 @@ impl Import {
 		// FLV stores DTS in the tag; PTS is DTS plus the composition offset.
 		let pts_ms = (dts as i64) + (composition_time as i64);
 		anyhow::ensure!(pts_ms >= 0, "negative video presentation timestamp");
-		stream.track.write(Frame {
+		match stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(pts_ms as u64)?,
+			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe,
-		})?;
-		Ok(())
+		}) {
+			Ok(()) | Err(crate::Error::MissingKeyframe(_)) => Ok(()),
+			Err(e) => Err(e.into()),
+		}
 	}
 
 	/// Write one audio frame as its own group, so the relay can forward it immediately.
@@ -350,6 +322,7 @@ impl Import {
 		};
 		stream.track.write(Frame {
 			timestamp: Timestamp::from_millis(timestamp)?,
+			duration: None,
 			payload: Bytes::copy_from_slice(data),
 			keyframe: true,
 		})?;
@@ -368,11 +341,11 @@ impl Import {
 			.lock()
 			.video
 			.renditions
-			.insert(net_track.name.clone(), config.clone());
+			.insert(net_track.name().to_string(), config.clone());
 		self.video = Some(VideoStream {
-			// Live FLV can join mid-GOP; tolerate leading deltas before the first keyframe.
-			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy)
-				.with_lenient_start(),
+			// Leading deltas before the first keyframe are skipped at the write
+			// site (the producer reports MissingKeyframe), so a mid-GOP join works.
+			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
 			config,
 		});
 		Ok(())
@@ -389,7 +362,7 @@ impl Import {
 			.lock()
 			.audio
 			.renditions
-			.insert(net_track.name.clone(), config.clone());
+			.insert(net_track.name().to_string(), config.clone());
 		self.audio = Some(AudioStream {
 			track: crate::container::Producer::new(net_track, crate::catalog::hang::Container::Legacy),
 			config,
@@ -402,7 +375,7 @@ impl Import {
 	fn replace_video(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
 		if let Some(mut old) = self.video.take() {
 			old.track.finish()?;
-			self.catalog.lock().video.renditions.remove(&old.track.name);
+			self.catalog.lock().video.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(".flv-v")?)
 	}
@@ -412,7 +385,7 @@ impl Import {
 	fn replace_audio(&mut self) -> anyhow::Result<moq_net::TrackProducer> {
 		if let Some(mut old) = self.audio.take() {
 			old.track.finish()?;
-			self.catalog.lock().audio.renditions.remove(&old.track.name);
+			self.catalog.lock().audio.renditions.remove(old.track.name());
 		}
 		Ok(self.broadcast.unique_track(".flv-a")?)
 	}
@@ -440,14 +413,14 @@ impl Import {
 	}
 }
 
-impl Drop for Import {
+impl<E: crate::catalog::hang::CatalogExt> Drop for Import<E> {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 		if let Some(stream) = &self.video {
-			catalog.video.renditions.remove(&stream.track.name);
+			catalog.video.renditions.remove(stream.track.name());
 		}
 		if let Some(stream) = &self.audio {
-			catalog.audio.renditions.remove(&stream.track.name);
+			catalog.audio.renditions.remove(stream.track.name());
 		}
 	}
 }

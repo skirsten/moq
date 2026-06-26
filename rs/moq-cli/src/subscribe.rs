@@ -98,10 +98,11 @@ impl Subscribe {
 	async fn run_fmp4(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();
 
-		// Fmp4 subscribes to the catalog internally, builds the merged init segment
-		// from the first catalog snapshot, then yields moof+mdat fragments in
-		// timestamp order across tracks.
-		let mut fmp4 = moq_mux::container::fmp4::Export::with_catalog_format(self.broadcast, self.catalog)?
+		// Fmp4 builds the merged init segment from the first catalog snapshot, then
+		// yields moof+mdat fragments in timestamp order across tracks. The catalog
+		// source honors the requested format (e.g. compressed `HangZ` or `Msf`).
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&self.broadcast, self.catalog)?;
+		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.broadcast, catalog)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
@@ -119,7 +120,8 @@ impl Subscribe {
 		// Mkv writes EBML + an unknown-size Segment header, then per-fragment
 		// Cluster elements. Avc3/Hev1 sources are transcoded to avc1/hvc1
 		// shape internally (synthesizing avcC/hvcC from inline parameter sets).
-		let mut mkv = moq_mux::container::mkv::Export::with_catalog_format(self.broadcast, self.catalog)?
+		let catalog = moq_mux::catalog::Consumer::<()>::new(&self.broadcast, self.catalog)?;
+		let mut mkv = moq_mux::container::mkv::Export::new(self.broadcast, catalog)
 			.with_latency(self.args.max_latency)
 			.with_fragment_duration(self.args.fragment_duration);
 
