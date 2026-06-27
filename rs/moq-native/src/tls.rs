@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(all(
+	any(feature = "quinn", feature = "noq", feature = "quiche"),
+	any(feature = "aws-lc-rs", feature = "ring")
+))]
 use rustls::pki_types::PrivatePkcs8KeyDer;
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 use std::sync::RwLock;
 
 /// Errors loading or generating TLS certificates and keys.
@@ -77,7 +80,7 @@ pub enum Error {
 	#[error(transparent)]
 	Rustls(#[from] rustls::Error),
 
-	#[cfg(any(feature = "quinn", feature = "noq"))]
+	#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
 
@@ -477,7 +480,10 @@ pub struct Server {
 	/// and can be used by the application to grant elevated access. Clients that
 	/// do not present a certificate are unaffected.
 	///
-	/// Only supported by the Quinn and noq backends.
+	/// Client certificate reporting is only supported by the Quinn and noq QUIC
+	/// backends. Plain-TLS listeners built via [`Self::server_config`] also use
+	/// these roots for optional mTLS when the feature set includes quinn, noq, or
+	/// quiche.
 	#[arg(
 		long = "server-tls-root",
 		id = "server-tls-root",
@@ -513,14 +519,14 @@ impl Server {
 	/// `alpn` sets the advertised ALPN protocols (e.g.
 	/// `vec![b"h2".to_vec(), b"http/1.1".to_vec()]`); pass an empty list for a
 	/// protocol like RTMPS that doesn't use ALPN.
-	#[cfg(any(feature = "noq", feature = "quinn"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub fn server_config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 		server_config(self, alpn)
 	}
 }
 
 /// Build a [`rustls::ServerConfig`] from a [`Server`] for a plain-TLS listener.
-#[cfg(any(feature = "noq", feature = "quinn"))]
+#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 fn server_config(config: &Server, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
 	let provider = crypto::provider();
 
@@ -591,7 +597,7 @@ impl PeerIdentity {
 /// TLS certificate information including fingerprints.
 #[derive(Debug)]
 pub struct Info {
-	#[cfg(any(feature = "noq", feature = "quinn"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
@@ -841,14 +847,14 @@ mod tests {
 
 // ── ServeCerts ──────────────────────────────────────────────────────
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 #[derive(Debug)]
 pub(crate) struct ServeCerts {
 	pub info: Arc<RwLock<Info>>,
 	provider: crypto::Provider,
 }
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
@@ -973,7 +979,7 @@ impl ServeCerts {
 	}
 }
 
-#[cfg(any(feature = "quinn", feature = "noq"))]
+#[cfg(any(feature = "quinn", feature = "noq", feature = "quiche"))]
 impl rustls::server::ResolvesServerCert for ServeCerts {
 	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		if let Some(cert) = self.best_certificate(&client_hello) {
