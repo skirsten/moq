@@ -99,6 +99,7 @@ impl Publish {
 
 	pub async fn run(self) -> anyhow::Result<()> {
 		let mut decoder = self.source;
+
 		let mut stdin = tokio::io::stdin();
 		let mut buffer = bytes::BytesMut::new();
 
