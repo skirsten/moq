@@ -4217,6 +4217,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
+ "jni 0.21.1",
  "moq-net",
  "notify",
  "parking_lot",
@@ -4227,6 +4228,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "rustls-native-certs",
+ "rustls-platform-verifier 0.6.2",
  "rustls-webpki",
  "serde",
  "serde_with",
@@ -4249,6 +4251,7 @@ dependencies = [
  "web-transport-quiche",
  "web-transport-quinn",
  "web-transport-trait",
+ "webpki-roots",
  "x509-parser",
 ]
 
