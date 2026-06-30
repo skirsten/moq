@@ -520,6 +520,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let request_id = self.control.next_request_id().await?;
 				let mut stream = Stream::open(&self.session, self.version).await?;
 
+				let bs = self.stats.broadcast(&absolute);
+
 				// Write the PublishNamespace message
 				stream.writer.encode(&ietf::PublishNamespace::ID).await?;
 				stream
@@ -529,6 +531,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						track_namespace: suffix.as_path(),
 					})
 					.await?;
+				// Count the broadcast name length (not the encoded message size) as soon
+				// as the request is on the wire, so a rejected namespace still counts the
+				// announce we spent.
+				bs.publisher_announced_bytes(absolute.as_str().len() as u64);
 
 				// Read response from stream.reader
 				let type_id: u64 = stream.reader.decode().await?;
@@ -540,8 +546,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
 						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						let guard = self.stats.broadcast(&absolute).publisher();
-						namespace_streams.insert(suffix, (request_id, stream, guard));
+						namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 					}
 					(Version::Draft14, ietf::PublishNamespaceError::ID) => {
 						let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
@@ -551,8 +556,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					(_, ietf::RequestOk::ID) => {
 						let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
 						tracing::debug!(message = ?msg, "publish namespace ok");
-						let guard = self.stats.broadcast(&absolute).publisher();
-						namespace_streams.insert(suffix, (request_id, stream, guard));
+						namespace_streams.insert(suffix, (request_id, stream, bs.publisher()));
 					}
 					(_, ietf::RequestError::ID) => {
 						let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
@@ -561,7 +565,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					_ => return Err(Error::UnexpectedMessage),
 				}
 			} else {
-				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
+				let absolute = self.origin.absolute(&path).to_owned();
+				tracing::debug!(broadcast = %absolute, "unannounce");
 				if let Some((request_id, mut stream, _stats)) = namespace_streams.remove(&suffix) {
 					// v14-16 sends PublishNamespaceDone; v17+ just closes the stream.
 					match self.version {
@@ -576,6 +581,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						}
 						_ => {}
 					}
+					// Count the unannounce name length, mirroring the announce above (we
+					// measure the name, not the on-wire framing, so this is draft-agnostic).
+					self.stats
+						.broadcast(&absolute)
+						.publisher_announced_bytes(absolute.as_str().len() as u64);
 					stream.writer.finish().ok();
 				}
 			}
@@ -595,6 +605,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 				_ => {}
 			}
+			let absolute = self.origin.absolute(&suffix).to_owned();
+			self.stats
+				.broadcast(&absolute)
+				.publisher_announced_bytes(absolute.as_str().len() as u64);
 			stream.writer.finish().ok();
 		}
 

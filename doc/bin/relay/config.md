@@ -234,13 +234,13 @@ counterpart no traffic can flow, so the entry is dropped:
 ```json
 {
   "demo/bbb": {
-    "announced": 1, "announced_closed": 0,
+    "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 5, "subscriptions_closed": 2,
     "bytes": 12345, "frames": 678, "groups": 9
   },
   "anon/foo": {
-    "announced": 1, "announced_closed": 0,
+    "announced": 1, "announced_closed": 0, "announced_bytes": 8,
     "broadcasts": 1, "broadcasts_closed": 0,
     "subscriptions": 2, "subscriptions_closed": 0,
     "bytes": 234, "frames": 12, "groups": 1
@@ -253,6 +253,11 @@ Field semantics:
 - `announced` / `announced_closed`: cumulative count of every broadcast
   announce/unannounce event on this `(tier, role)` slot, regardless of
   whether any subscription happened. Use this for "all known broadcasts".
+- `announced_bytes`: cumulative broadcast-name length summed over each
+  announce and unannounce of this broadcast. It counts the name, not the
+  encoded message size, so a broadcast isn't charged for hop chains or
+  framing overhead (and the count is the same across protocol versions).
+  Separate from `bytes`, which is media payload.
 - `broadcasts` / `broadcasts_closed`: per-(broadcast, session)
   subscription sentinel. The first active subscription a peer session
   opens for a broadcast bumps `broadcasts`; the last one it closes bumps
