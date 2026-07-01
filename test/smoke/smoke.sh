@@ -175,9 +175,8 @@ build_relay_cli() {
         exit 1
     }
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
-    # `cargo build -p moq-cli` names the binary after the crate (moq-cli); the
-    # apt/rpm packages rename it to `moq`, but from source it's moq-cli.
-    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq-cli"
+    # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
+    [[ -n "$MOQ" ]] || MOQ="$TARGET_BASE/$PROFILE/moq"
 }
 
 # Editable-install the workspace Python build (maturin builds rs/moq-ffi, then
@@ -351,7 +350,7 @@ start_publisher() {
     local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
     case "$lang" in
         rust)
-            (ffmpeg_h264 | "$MOQ" publish --url "$URL" --broadcast "$broadcast" avc3) >"$log" 2>&1 &
+            (ffmpeg_h264 | "$MOQ" --client-connect "$URL" --broadcast "$broadcast" import avc3) >"$log" 2>&1 &
             ;;
         python)
             (ffmpeg_h264 | "$PY" "$CLIENTS/python/smoke.py" \
@@ -390,8 +389,8 @@ run_subscriber() {
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
             # SIGTERM that fires when no data arrives within the timeout.
             local n
-            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" subscribe --url "$URL" --broadcast "$broadcast" \
-                --format fmp4 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
+            n=$(timeout -k 3 "$TIMEOUT" "$MOQ" --client-connect "$URL" --broadcast "$broadcast" \
+                export fmp4 2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
