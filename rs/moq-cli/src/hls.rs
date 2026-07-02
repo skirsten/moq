@@ -37,6 +37,11 @@ pub struct ExportArgs {
 	#[arg(long, default_value = "16s", value_parser = humantime::parse_duration)]
 	pub window: Duration,
 
+	/// Maximum latency before skipping a stalled group. Generous by default so
+	/// live GOPs aren't skipped while segments build.
+	#[arg(long = "latency-max", default_value = "10s", value_parser = humantime::parse_duration)]
+	pub latency_max: Duration,
+
 	/// Browser CORS policy for the HLS listener.
 	#[command(flatten)]
 	pub cors: crate::web::Cors,
@@ -70,6 +75,7 @@ pub async fn export(origin: moq_net::OriginConsumer, args: ExportArgs, name: Str
 	let config = moq_hls::export::Config {
 		part_target: args.part_target,
 		window: args.window,
+		latency: args.latency_max,
 		..Default::default()
 	};
 	let server = moq_hls::Server::new(scoped, config);
