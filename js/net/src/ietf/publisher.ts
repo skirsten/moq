@@ -7,7 +7,12 @@ import { error } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceDone,
+	PublishNamespaceError,
+	PublishNamespaceOk,
+} from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
@@ -79,6 +84,13 @@ export class Publisher {
 					} else {
 						await RequestOk.decode(stream.reader, this.#session.version);
 					}
+				} else if (respTypeId === PublishNamespaceError.id || respTypeId === RequestError.id) {
+					// draft-14 answers with PublishNamespaceError; draft-15+ with the generic RequestError.
+					const err =
+						respTypeId === PublishNamespaceError.id
+							? await PublishNamespaceError.decode(stream.reader, this.#session.version)
+							: await RequestError.decode(stream.reader, this.#session.version);
+					throw new Error(`PublishNamespace rejected: code=${err.errorCode} reason=${err.reasonPhrase}`);
 				} else {
 					throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				}
