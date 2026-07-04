@@ -28,6 +28,10 @@ export function parseCatalogFormat(value: string | null): CatalogFormat | undefi
 	return CATALOG_FORMATS.find((f) => f === value);
 }
 
+// Resubscribe interval for relays without announce support, where a SUBSCRIBE
+// for a not-yet-published catalog track errors instead of waiting.
+const CATALOG_RETRY_MS = 1000;
+
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
@@ -87,6 +91,10 @@ export class Broadcast {
 	// Derived in its own effect so that flaps for unrelated broadcasts don't
 	// retrigger the broadcast/catalog subscriptions.
 	#announcedNow = new Signal(false);
+
+	// Bumped by the retry timer to re-run #runCatalog. Cloudflare sends no
+	// announcement when the catalog track finally appears, so we poll instead.
+	#catalogRetry = new Signal(0);
 
 	signals = new Effect();
 
@@ -167,6 +175,13 @@ export class Broadcast {
 		const broadcast = effect.get(this.active);
 		if (!broadcast) return;
 
+		// Cloudflare has no announce discovery and rejects a SUBSCRIBE for a track
+		// that doesn't exist yet, so a watcher that connects before the publisher
+		// must resubscribe until the catalog track appears.
+		const conn = effect.get(this.connection);
+		const retryOnMiss = conn?.url.hostname.endsWith("mediaoverquic.com") ?? false;
+		effect.get(this.#catalogRetry);
+
 		this.status.set("loading");
 
 		const trackName = format === "hang" ? Catalog.TRACK : format === "hangz" ? Catalog.TRACK_COMPRESSED : "catalog";
@@ -197,11 +212,17 @@ export class Broadcast {
 					this.catalog.set(update);
 					this.status.set("live");
 				}
-			} catch (err) {
-				console.warn("error fetching catalog", this.name.peek(), err);
-			} finally {
 				this.catalog.set(undefined);
 				this.status.set("offline");
+			} catch (err) {
+				console.warn("error fetching catalog", this.name.peek(), err);
+				this.catalog.set(undefined);
+				if (retryOnMiss) {
+					this.status.set("loading");
+					effect.timer(() => this.#catalogRetry.update((n) => n + 1), CATALOG_RETRY_MS);
+				} else {
+					this.status.set("offline");
+				}
 			}
 		});
 	}
