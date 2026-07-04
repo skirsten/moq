@@ -13,6 +13,7 @@ pub struct Client {
 	stats: StatsHandle,
 	versions: Versions,
 	path: Option<String>,
+	consume_dynamic: bool,
 }
 
 impl Client {
@@ -27,6 +28,19 @@ impl Client {
 
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
+		self
+	}
+
+	/// Enable announce-less consume for the attached consume origin.
+	///
+	/// When enabled, the session registers the consume origin's dynamic handler (see
+	/// [`OriginProducer::dynamic`]), so [`crate::OriginConsumer::request_broadcast`] resolves a
+	/// broadcast by exact path by issuing a SUBSCRIBE on demand, without waiting for a wire
+	/// announcement. Required for relays that don't support announce-based discovery (e.g.
+	/// Cloudflare, which never sends SUBSCRIBE_NAMESPACE responses). Off by default so relay and
+	/// cluster behavior, which share one dynamic-request queue per origin, is unchanged.
+	pub fn with_consume_dynamic(mut self, enabled: bool) -> Self {
+		self.consume_dynamic = enabled;
 		self
 	}
 
@@ -95,6 +109,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft18,
+					self.consume_dynamic,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -116,6 +131,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					ietf::Version::Draft17,
+					self.consume_dynamic,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -158,6 +174,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite05Wip,
 					setup,
+					self.consume_dynamic,
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
@@ -175,6 +192,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite04,
 					lite::Setup::default(),
+					self.consume_dynamic,
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite04.into(), recv_bw));
@@ -193,6 +211,7 @@ impl Client {
 					self.stats.clone(),
 					lite::Version::Lite03,
 					lite::Setup::default(),
+					self.consume_dynamic,
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
@@ -241,6 +260,7 @@ impl Client {
 					self.stats.clone(),
 					v,
 					lite::Setup::default(),
+					self.consume_dynamic,
 				)?
 			}
 			Version::Ietf(v) => {
@@ -260,6 +280,7 @@ impl Client {
 					self.consume.clone(),
 					self.stats.clone(),
 					v,
+					self.consume_dynamic,
 				)?;
 				None
 			}

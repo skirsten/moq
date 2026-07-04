@@ -4,6 +4,10 @@ use crate::{
 };
 
 use super::{Publisher, PublisherConfig, Setup, Subscriber, SubscriberConfig, Version, send_setup};
+
+// Handshake dispatcher: each argument is an independent session parameter, so bundling them
+// into a config struct would just add indirection.
+#[allow(clippy::too_many_arguments)]
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
@@ -20,7 +24,18 @@ pub fn start<S: web_transport_trait::Session>(
 	// The SETUP message to advertise on the Setup stream (moq-lite-05+). Ignored on
 	// earlier versions, which have no Setup stream.
 	our_setup: Setup,
+	// When true and a subscribe origin is present, serve announce-less consume: register the
+	// origin's dynamic handler so `request_broadcast` resolves an exact path by issuing a
+	// SUBSCRIBE on demand, without waiting for a wire announcement.
+	consume_dynamic: bool,
 ) -> Result<Option<BandwidthConsumer>, Error> {
+	// Register the dynamic handler synchronously (before this returns) so a request_broadcast
+	// issued right after connect queues instead of racing the spawned driver.
+	let dynamic_handler = match (consume_dynamic, &subscribe) {
+		(true, Some(origin)) => Some(origin.dynamic()),
+		_ => None,
+	};
+
 	let recv_bw = BandwidthProducer::new();
 
 	let recv_bw_consumer = match version {
@@ -51,6 +66,10 @@ pub fn start<S: web_transport_trait::Session>(
 		stats,
 		version,
 	});
+
+	if let Some(dynamic) = dynamic_handler {
+		web_async::spawn(subscriber.clone().run_consume_dynamic(dynamic));
+	}
 
 	// moq-lite-05 reintroduced a Setup stream: each endpoint opens one and sends a
 	// single SETUP message advertising its optional capabilities.

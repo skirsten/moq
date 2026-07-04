@@ -3,8 +3,9 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 
 use crate::{
-	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE, OriginProducer,
-	Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Track, TrackProducer,
+	Broadcast, BroadcastConsumer, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, MAX_FRAME_SIZE,
+	OriginDynamic, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, Track,
+	TrackProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -455,6 +456,73 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
+	/// Serve announce-less consume requests for the subscribe origin.
+	///
+	/// Registers as the origin's dynamic handler (see [`OriginProducer::dynamic`]): each
+	/// [`crate::OriginConsumer::request_broadcast`] for a path with no live announcement is
+	/// served by bootstrapping an announce-less subscription via [`Self::consume`]. This is
+	/// how a consumer subscribes by exact path on relays that don't announce (e.g. Cloudflare).
+	/// Runs until the session closes or every handler clone is dropped.
+	pub async fn run_consume_dynamic(self, mut dynamic: OriginDynamic) {
+		let root = dynamic.root().to_owned();
+
+		loop {
+			let request = tokio::select! {
+				request = dynamic.requested_broadcast() => request,
+				_ = self.session.closed() => break,
+			};
+
+			let request = match request {
+				Ok(request) => request,
+				Err(err) => {
+					tracing::debug!(%err, "announce-less consume handler closed");
+					break;
+				}
+			};
+
+			// Requests carry the absolute path; the bootstrap wants it relative to the
+			// origin root (matching start_announce, whose path is root-relative).
+			let relative = request
+				.path()
+				.strip_prefix(root.as_str())
+				.unwrap_or_default()
+				.to_owned();
+			tracing::debug!(broadcast = %request.path(), "announce-less consume");
+			request.accept(self.consume(relative));
+		}
+	}
+
+	/// Bootstrap an announce-less subscription for `path`, returning a consumer that
+	/// issues SUBSCRIBE for its tracks on demand without waiting for a wire announcement.
+	///
+	/// Mirrors [`Self::start_announce`]'s producer + dynamic + `run_broadcast` spawn, but does
+	/// not publish the broadcast into the announce tree (so it never appears in
+	/// [`crate::OriginConsumer::announced`]) and is not tied to an announce refcount. `path` is
+	/// relative to the subscribe origin root. Requires a subscribe origin: the returned
+	/// consumer only produces tracks once [`Self::run_broadcast`] can reach `self.origin`.
+	pub fn consume(&self, path: PathOwned) -> BroadcastConsumer {
+		// Stamp this connection's origin as the sole hop so the route is attributable to the
+		// upstream session (moq-transport carries no hops on the wire, so the chain is empty).
+		let mut hops = crate::OriginList::new();
+		hops.push(self.session_origin)
+			.expect("an empty hop chain has room for one entry");
+		let broadcast = Broadcast { hops }.produce();
+
+		// Bump dynamic >= 1 before returning so a subscribe_track on the consumer queues a
+		// request rather than getting NotFound.
+		let dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+
+		let this = self.clone();
+		web_async::spawn(async move {
+			if let Err(err) = this.run_broadcast(path, dynamic).await {
+				tracing::debug!(%err, "error running announce-less broadcast");
+			}
+		});
+
+		consumer
+	}
+
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
 		let Some(origin) = &self.origin else {
 			return Err(Error::InvalidRole);
@@ -893,5 +961,151 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::Bytes;
+
+	// A transport that never opens streams or closes. Enough to drive the announce-less
+	// consume handler, which only awaits `session.closed()` until a request arrives, then
+	// bootstraps a broadcast whose subscribe would open a stream (left pending here).
+	#[derive(Clone, Default)]
+	struct TestSession;
+
+	#[derive(Debug)]
+	struct TestError;
+
+	impl std::fmt::Display for TestError {
+		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+			write!(f, "test transport error")
+		}
+	}
+
+	impl std::error::Error for TestError {}
+
+	impl web_transport_trait::Error for TestError {
+		fn session_error(&self) -> Option<(u32, String)> {
+			Some((0, "closed".to_string()))
+		}
+	}
+
+	struct TestSend;
+
+	impl web_transport_trait::SendStream for TestSend {
+		type Error = TestError;
+
+		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+			Ok(buf.len())
+		}
+		fn set_priority(&mut self, _order: u8) {}
+		fn finish(&mut self) -> Result<(), Self::Error> {
+			Ok(())
+		}
+		fn reset(&mut self, _code: u32) {}
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	struct TestRecv;
+
+	impl web_transport_trait::RecvStream for TestRecv {
+		type Error = TestError;
+
+		async fn read(&mut self, _dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+			Ok(None)
+		}
+		fn stop(&mut self, _code: u32) {}
+		async fn closed(&mut self) -> Result<(), Self::Error> {
+			std::future::pending().await
+		}
+	}
+
+	impl web_transport_trait::Session for TestSession {
+		type SendStream = TestSend;
+		type RecvStream = TestRecv;
+		type Error = TestError;
+
+		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
+			std::future::pending().await
+		}
+		async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+		async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
+			std::future::pending().await
+		}
+		async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
+			std::future::pending().await
+		}
+		fn send_datagram(&self, _payload: Bytes) -> Result<(), Self::Error> {
+			Ok(())
+		}
+		async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
+			std::future::pending().await
+		}
+		fn max_datagram_size(&self) -> usize {
+			1200
+		}
+		fn close(&self, _code: u32, _reason: &str) {}
+		async fn closed(&self) -> Self::Error {
+			std::future::pending().await
+		}
+	}
+
+	fn test_subscriber(origin: OriginProducer) -> Subscriber<TestSession> {
+		Subscriber::new(
+			TestSession,
+			Some(origin),
+			Control::new(Some(RequestId(u32::MAX as u64)), true),
+			StatsHandle::default(),
+			Version::Draft14,
+		)
+	}
+
+	// The announce-less handler serves a `request_broadcast` for an exact path that was never
+	// announced, and the served broadcast never appears in `announced()`.
+	#[tokio::test(start_paused = true)]
+	async fn consume_dynamic_serves_request_without_announcing() {
+		let origin = crate::Origin::random().produce();
+		let subscriber = test_subscriber(origin.clone());
+
+		web_async::spawn(subscriber.run_consume_dynamic(origin.dynamic()));
+
+		// A watcher that must never observe the dynamically-served broadcast.
+		let mut watcher = origin.consume();
+
+		let broadcast = origin
+			.consume()
+			.request_broadcast("room/alice")
+			.await
+			.expect("handler should serve the unannounced path");
+
+		// The served broadcast is dynamic: subscribe_track queues a request rather than NotFound.
+		broadcast
+			.subscribe_track(&Track {
+				name: "video0".to_string(),
+				priority: 0,
+			})
+			.expect("dynamic broadcast should accept track requests");
+
+		// It was never published into the announce tree.
+		watcher.assert_next_wait();
+	}
+
+	// Without the handler registered, `request_broadcast` for an unannounced path is Unroutable.
+	#[tokio::test(start_paused = true)]
+	async fn no_handler_is_unroutable() {
+		let origin = crate::Origin::random().produce();
+		let _subscriber = test_subscriber(origin.clone());
+
+		let result = origin.consume().request_broadcast("room/alice").await;
+		assert!(
+			matches!(result, Err(Error::Unroutable)),
+			"no dynamic handler means the path is unroutable"
+		);
 	}
 }

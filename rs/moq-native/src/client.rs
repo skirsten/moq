@@ -241,6 +241,18 @@ impl Client {
 		self
 	}
 
+	/// Enable announce-less consume for the attached consume origin.
+	///
+	/// Delegates to [`moq_net::Client::with_consume_dynamic`]: the session registers the consume
+	/// origin's dynamic handler so [`moq_net::OriginConsumer::request_broadcast`] resolves a
+	/// broadcast by exact path via an on-demand SUBSCRIBE, without waiting for a wire
+	/// announcement. Required for relays that don't support announce-based discovery (e.g.
+	/// Cloudflare). Off by default so relay/cluster behavior is unchanged.
+	pub fn with_consume_dynamic(mut self, enabled: bool) -> Self {
+		self.moq = self.moq.with_consume_dynamic(enabled);
+		self
+	}
+
 	/// Attach a tier-scoped [`moq_net::StatsHandle`] to all sessions opened by this client.
 	pub fn with_stats(mut self, stats: moq_net::StatsHandle) -> Self {
 		self.moq = self.moq.with_stats(stats);

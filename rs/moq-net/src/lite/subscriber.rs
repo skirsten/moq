@@ -6,8 +6,9 @@ use std::{
 use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
-	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	MAX_FRAME_SIZE, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats, SubscriberTrack, TrackProducer,
+	AsPath, BandwidthProducer, Broadcast, BroadcastConsumer, BroadcastDynamic, Error, Frame, FrameProducer, Group,
+	GroupProducer, MAX_FRAME_SIZE, OriginDynamic, OriginProducer, Path, PathOwned, StatsHandle, SubscriberStats,
+	SubscriberTrack, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -286,6 +287,65 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		Ok(())
+	}
+
+	/// Serve announce-less consume requests for the subscribe origin.
+	///
+	/// Registers as the origin's dynamic handler (see [`OriginProducer::dynamic`]): each
+	/// [`crate::OriginConsumer::request_broadcast`] for a path with no live announcement is
+	/// served by bootstrapping an announce-less subscription via [`Self::consume`]. Runs until
+	/// the session closes or every handler clone is dropped.
+	pub async fn run_consume_dynamic(self, mut dynamic: OriginDynamic) {
+		let root = dynamic.root().to_owned();
+
+		loop {
+			let request = tokio::select! {
+				request = dynamic.requested_broadcast() => request,
+				_ = self.session.closed() => break,
+			};
+
+			let request = match request {
+				Ok(request) => request,
+				Err(err) => {
+					tracing::debug!(%err, "announce-less consume handler closed");
+					break;
+				}
+			};
+
+			// Requests carry the absolute path; the bootstrap wants it relative to the
+			// origin root (matching start_announce, whose path is root-relative).
+			let relative = request
+				.path()
+				.strip_prefix(root.as_str())
+				.unwrap_or_default()
+				.to_owned();
+			tracing::debug!(broadcast = %self.log_path(&relative), "announce-less consume");
+			request.accept(self.consume(relative));
+		}
+	}
+
+	/// Bootstrap an announce-less subscription for `path`, returning a consumer that issues
+	/// SUBSCRIBE for its tracks on demand without waiting for a wire announcement.
+	///
+	/// Mirrors [`Self::start_announce`]'s producer + dynamic + `run_broadcast` spawn, but does
+	/// not publish the broadcast into the origin (so it never appears in
+	/// [`crate::OriginConsumer::announced`]). `path` is relative to the subscribe origin root.
+	pub fn consume(&self, path: PathOwned) -> BroadcastConsumer {
+		// Guarantee one hop we control so the route stays attributable, matching
+		// start_announce's empty-chain handling.
+		let mut hops = crate::OriginList::new();
+		hops.push(self.session_origin)
+			.expect("an empty hop chain has room for one entry");
+		let broadcast = Broadcast { hops }.produce();
+
+		// Bump dynamic >= 1 before returning so a subscribe_track on the consumer queues a
+		// request rather than getting NotFound.
+		let dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+
+		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+
+		consumer
 	}
 
 	/// Returns `Ok(true)` if the announce was accepted (and the broadcast was

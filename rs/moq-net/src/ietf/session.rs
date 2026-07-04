@@ -20,7 +20,19 @@ pub fn start<S: web_transport_trait::Session>(
 	// Tier-scoped stats handle. Pass [`StatsHandle::default`] to opt out.
 	stats: StatsHandle,
 	version: Version,
+	// When true and a subscribe origin is present, serve announce-less consume: register
+	// the origin's dynamic handler so `request_broadcast` resolves an exact path by issuing
+	// a SUBSCRIBE on demand, without waiting for a wire announcement (e.g. Cloudflare).
+	consume_dynamic: bool,
 ) -> Result<(), Error> {
+	// Register the dynamic handler synchronously (before this returns) so a request_broadcast
+	// issued right after connect queues instead of racing the spawned driver and resolving
+	// Unroutable.
+	let dynamic_handler = match (consume_dynamic, &subscribe) {
+		(true, Some(origin)) => Some(origin.dynamic()),
+		_ => None,
+	};
+
 	web_async::spawn(async move {
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -33,6 +45,10 @@ pub fn start<S: web_transport_trait::Session>(
 
 				let publisher = Publisher::new(adapter.clone(), publish, control.clone(), stats.clone(), version);
 				let subscriber = Subscriber::new(adapter.clone(), subscribe, control, stats, version);
+
+				if let Some(dynamic) = dynamic_handler {
+					web_async::spawn(subscriber.clone().run_consume_dynamic(dynamic));
+				}
 
 				let dispatch_session = adapter.clone();
 				let mut sub_ns = subscriber.clone();
@@ -78,6 +94,10 @@ pub fn start<S: web_transport_trait::Session>(
 				let control = Control::new(None, client);
 				let publisher = Publisher::new(session.clone(), publish, control.clone(), stats.clone(), version);
 				let subscriber = Subscriber::new(session.clone(), subscribe, control, stats, version);
+
+				if let Some(dynamic) = dynamic_handler {
+					web_async::spawn(subscriber.clone().run_consume_dynamic(dynamic));
+				}
 
 				let sub_ns_session = session.clone();
 				let mut sub_ns = subscriber.clone();

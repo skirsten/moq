@@ -269,6 +269,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.consume,
 					server.stats,
 					version,
+					false,
 				)?;
 				tracing::debug!(?version, "connected");
 				return Ok(Session::new(session, version.into(), None));
@@ -282,6 +283,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.stats,
 					version,
 					lite::Setup::default(),
+					false,
 				)?;
 				return Ok(Session::new(session, version.into(), recv_bw));
 			}
@@ -295,6 +297,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.stats,
 					lite::Version::Lite05Wip,
 					lite::Setup::default(),
+					false,
 				)?;
 				return Ok(Session::new(session, lite::Version::Lite05Wip.into(), recv_bw));
 			}
@@ -335,6 +338,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.stats,
 					v,
 					lite::Setup::default(),
+					false,
 				)?
 			}
 			Version::Ietf(v) => {
@@ -348,6 +352,7 @@ impl<S: web_transport_trait::Session> Request<S> {
 					server.consume,
 					server.stats,
 					v,
+					false,
 				)?;
 				None
 			}
