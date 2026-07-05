@@ -773,7 +773,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "broadcast closed");
 				let _ = track.abort(err);
 			}
-			res = stream.reader.closed() => {
+			res = self.run_subscribe_control(&mut stream) => {
 				match res {
 					Ok(()) => {
 						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe complete");
@@ -794,6 +794,35 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		stream.writer.finish().ok();
+	}
+
+	/// Read control messages on the subscribe stream after SubscribeOk until it ends.
+	///
+	/// A PUBLISH_DONE (or any trailing control message) followed by FIN is a normal
+	/// end of subscription, so it resolves `Ok(())` (the caller finishes the track);
+	/// only a real decode/transport error resolves `Err`. Relays that don't announce
+	/// (e.g. Cloudflare) use this to terminate a cold-start subscription that produced
+	/// no groups, and app-level retry loops resubscribe.
+	async fn run_subscribe_control(&self, stream: &mut Stream<S, Version>) -> Result<(), Error> {
+		loop {
+			let type_id: u64 = match stream.reader.decode_maybe().await? {
+				Some(id) => id,
+				None => return Ok(()),
+			};
+			let size: u16 = stream.reader.decode().await?;
+			let mut data = stream.reader.read_exact(size as usize).await?;
+
+			match type_id {
+				ietf::PublishDone::ID => {
+					let msg = ietf::PublishDone::decode_msg(&mut data, self.version)?;
+					tracing::debug!(status_code = %msg.status_code, reason = %msg.reason_phrase, "subscribe done");
+					return Ok(());
+				}
+				_ => {
+					tracing::debug!(type_id, "ignoring control message on subscribe stream");
+				}
+			}
+		}
 	}
 
 	async fn write_subscribe(
