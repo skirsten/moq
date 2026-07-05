@@ -1,7 +1,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Path } from "@moq/net";
+import { Connection, Path } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
@@ -125,10 +125,10 @@ export class Broadcast {
 			return;
 		}
 
-		// Cloudflare's relay does not yet support announcement subscriptions,
-		// so default to subscribing immediately instead of waiting forever.
+		// Announce-less relays never announce anything, so subscribe
+		// immediately instead of waiting forever.
 		const conn = effect.get(this.connection);
-		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
+		if (conn && Connection.isAnnounceLess(conn.url)) {
 			this.#announcedNow.set(true);
 			return;
 		}
@@ -175,11 +175,11 @@ export class Broadcast {
 		const broadcast = effect.get(this.active);
 		if (!broadcast) return;
 
-		// Cloudflare has no announce discovery and rejects a SUBSCRIBE for a track
-		// that doesn't exist yet, so a watcher that connects before the publisher
-		// must resubscribe until the catalog track appears.
+		// Announce-less relays reject a SUBSCRIBE for a track that doesn't exist
+		// yet and send no announcement when it appears (or reappears), so a
+		// watcher must resubscribe on a timer until the catalog track is up.
 		const conn = effect.get(this.connection);
-		const retryOnMiss = conn?.url.hostname.endsWith("mediaoverquic.com") ?? false;
+		const retryOnMiss = conn ? Connection.isAnnounceLess(conn.url) : false;
 		effect.get(this.#catalogRetry);
 
 		this.status.set("loading");
@@ -202,6 +202,23 @@ export class Broadcast {
 		}
 
 		effect.spawn(async () => {
+			// On teardown the next run owns the subscription, so a retry timer
+			// scheduled here would tear that run down again a second later.
+			// Registered before the race below so it settles first on cancel.
+			let cancelled = false;
+			void effect.cancel.then(() => {
+				cancelled = true;
+			});
+
+			const retryOrOffline = () => {
+				if (retryOnMiss && !cancelled) {
+					this.status.set("loading");
+					effect.timer(() => this.#catalogRetry.update((n) => n + 1), CATALOG_RETRY_MS);
+				} else {
+					this.status.set("offline");
+				}
+			};
+
 			try {
 				for (;;) {
 					const update = await Promise.race([effect.cancel, fetchNext()]);
@@ -213,16 +230,13 @@ export class Broadcast {
 					this.status.set("live");
 				}
 				this.catalog.set(undefined);
-				this.status.set("offline");
+				// A track that ends cleanly (the publisher went away) also gets
+				// no announcement to revive it, so poll for its return too.
+				retryOrOffline();
 			} catch (err) {
 				console.warn("error fetching catalog", this.name.peek(), err);
 				this.catalog.set(undefined);
-				if (retryOnMiss) {
-					this.status.set("loading");
-					effect.timer(() => this.#catalogRetry.update((n) => n + 1), CATALOG_RETRY_MS);
-				} else {
-					this.status.set("offline");
-				}
+				retryOrOffline();
 			}
 		});
 	}
