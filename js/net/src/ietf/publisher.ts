@@ -27,7 +27,13 @@ import { Version } from "./version.ts";
 // Delay before re-announcing after the announce stream dies unexpectedly.
 const ANNOUNCE_RETRY_MS = 1000;
 
-// An explicit rejection from the relay is authoritative; retrying would spam it.
+// Cloudflare parks a dead publisher's namespace for ~14s and rejects a re-announce
+// under the same name until it expires. Back off longer than a stream death so the
+// retry loop rides out the zombie window instead of hammering the relay.
+const ANNOUNCE_REJECT_RETRY_MS = 2000;
+
+// The relay explicitly rejected the announce (vs the stream dying). Retried like a
+// stream death but on the longer backoff; the distinct type only shapes the log line.
 class AnnounceRejected extends Error {}
 
 /**
@@ -60,8 +66,8 @@ export class Publisher {
 
 	/**
 	 * Publishes a broadcast with any associated tracks.
-	 * Announces via PublishNamespace and re-announces if the announce stream dies
-	 * while the broadcast is still open; an explicit rejection is terminal.
+	 * Announces via PublishNamespace and re-announces while the broadcast stays open,
+	 * whether the announce stream dies or the relay rejects the announce.
 	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
 		this.#broadcasts.set(path, broadcast);
@@ -72,6 +78,7 @@ export class Publisher {
 	async #runPublish(path: Path.Valid, broadcast: Broadcast) {
 		try {
 			for (;;) {
+				let retryDelay = ANNOUNCE_RETRY_MS;
 				try {
 					const requestId = await this.#session.nextRequestId();
 					if (requestId === undefined) return;
@@ -83,10 +90,11 @@ export class Publisher {
 				} catch (err: unknown) {
 					const e = error(err);
 					if (err instanceof AnnounceRejected) {
-						console.warn(`announce rejected: broadcast=${path} error=${e.message}`);
-						return;
+						console.warn(`announce rejected: broadcast=${path} error=${e.message}, retrying`);
+						retryDelay = ANNOUNCE_REJECT_RETRY_MS;
+					} else {
+						console.warn(`announce failed: broadcast=${path} error=${e.message}, retrying`);
 					}
-					console.warn(`announce failed: broadcast=${path} error=${e.message}, retrying`);
 				}
 
 				const reason = await Promise.race([
@@ -95,7 +103,7 @@ export class Publisher {
 						() => "session" as const,
 						() => "session" as const,
 					),
-					new Promise<"retry">((resolve) => setTimeout(() => resolve("retry"), ANNOUNCE_RETRY_MS)),
+					new Promise<"retry">((resolve) => setTimeout(() => resolve("retry"), retryDelay)),
 				]);
 				if (reason !== "retry") return;
 			}

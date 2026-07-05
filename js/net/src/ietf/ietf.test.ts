@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
-import { Reader, Writer } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import { ControlStreamAdapter } from "./adapter.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
@@ -1114,4 +1115,28 @@ test("Group: draft-18 sets FIRST_OBJECT bit, draft-17 does not", async () => {
 	const v17 = await encodeVersioned(makeGroup(), Version.DRAFT_17);
 	expect(Array.from(v18)).not.toEqual(Array.from(v17));
 	await expect(decodeVersioned(v18, Group.decode, Version.DRAFT_17)).rejects.toThrow(/Unsupported group type/);
+});
+
+test("ControlStreamAdapter: nextRequestId gives up and closes when the budget is exhausted with no extension", async () => {
+	let quicClosed = false;
+	const quic = {
+		close() {
+			quicClosed = true;
+		},
+		closed: new Promise<void>(() => {}),
+	} as unknown as WebTransport;
+
+	const control = new Stream({
+		readable: new ReadableStream<Uint8Array>(),
+		writable: new WritableStream<Uint8Array>(),
+		version: Version.DRAFT_16,
+	});
+
+	// maxRequestId 0 means the first request is already over budget; short grace to keep the test fast.
+	const adapter = new ControlStreamAdapter(quic, control, Version.DRAFT_16, 0n, 10);
+
+	expect(await adapter.nextRequestId()).toBeUndefined();
+	expect(quicClosed).toBe(true);
+	// Session is now closed, so further requests short-circuit.
+	expect(await adapter.nextRequestId()).toBeUndefined();
 });

@@ -4,6 +4,11 @@ import * as Varint from "../varint.ts";
 import * as Namespace from "./namespace.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
+// How long nextRequestId waits for a MAX_REQUEST_ID extension once the budget is spent
+// before giving up. Some relays (Cloudflare) grant a fixed budget and never extend it,
+// so an unbounded wait would wedge the session forever.
+const MAX_REQUEST_ID_GRACE_MS = 10_000;
+
 /**
  * Interface for opening outgoing bidi streams and allocating request IDs.
  * Implemented by both ControlStreamAdapter (v14-v16) and NativeSession (v17).
@@ -99,11 +104,19 @@ export class ControlStreamAdapter implements Session {
 	// Request ID flow control
 	#requestId = 0n;
 	#maxRequestId: bigint;
-	#maxRequestIdResolves: (() => void)[] = [];
+	// Resolved with true on a MAX_REQUEST_ID extension, false on close.
+	#maxRequestIdResolves: ((extended: boolean) => void)[] = [];
+	#maxRequestIdGraceMs: number;
 
 	#closed = false;
 
-	constructor(quic: WebTransport, controlStream: Stream, version: IetfVersion, maxRequestId: bigint) {
+	constructor(
+		quic: WebTransport,
+		controlStream: Stream,
+		version: IetfVersion,
+		maxRequestId: bigint,
+		maxRequestIdGraceMs = MAX_REQUEST_ID_GRACE_MS,
+	) {
 		this.#quic = quic;
 		this.#reader = controlStream.reader;
 		this.#reader.version = version;
@@ -111,6 +124,7 @@ export class ControlStreamAdapter implements Session {
 		this.#writer.version = version;
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
+		this.#maxRequestIdGraceMs = maxRequestIdGraceMs;
 	}
 
 	/**
@@ -208,10 +222,37 @@ export class ControlStreamAdapter implements Session {
 				this.#requestId += 2n;
 				return id;
 			}
-			await new Promise<void>((resolve) => {
-				this.#maxRequestIdResolves.push(resolve);
-			});
+
+			const extended = await this.#awaitMaxRequestId();
+			if (this.#closed) return undefined;
+			if (!extended) {
+				console.warn(
+					`request id budget exhausted (max=${this.#maxRequestId}); relay sent no MAX_REQUEST_ID within ${this.#maxRequestIdGraceMs}ms, closing session to reconnect`,
+				);
+				this.#quic.close();
+				this.close();
+				return undefined;
+			}
 		}
+	}
+
+	// Resolves true on a MAX_REQUEST_ID extension (or close), false if the grace period
+	// elapses first. The timer is cleared once a resolver fires so a later close() never
+	// invokes a stale one.
+	#awaitMaxRequestId(): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const done = (extended: boolean) => {
+				if (timer !== undefined) clearTimeout(timer);
+				resolve(extended);
+			};
+			this.#maxRequestIdResolves.push(done);
+			timer = setTimeout(() => {
+				const idx = this.#maxRequestIdResolves.indexOf(done);
+				if (idx !== -1) this.#maxRequestIdResolves.splice(idx, 1);
+				resolve(false);
+			}, this.#maxRequestIdGraceMs);
+		});
 	}
 
 	/**
@@ -261,7 +302,7 @@ export class ControlStreamAdapter implements Session {
 						break;
 					case Route.MaxRequestId:
 						this.#maxRequestId = requestId;
-						for (const resolve of this.#maxRequestIdResolves) resolve();
+						for (const resolve of this.#maxRequestIdResolves) resolve(true);
 						this.#maxRequestIdResolves = [];
 						break;
 				}
@@ -688,7 +729,7 @@ export class ControlStreamAdapter implements Session {
 		this.#subscribeNamespaces.clear();
 
 		// Unblock maxRequestId waiters
-		for (const resolve of this.#maxRequestIdResolves) resolve();
+		for (const resolve of this.#maxRequestIdResolves) resolve(false);
 		this.#maxRequestIdResolves = [];
 	}
 }
