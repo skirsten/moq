@@ -3,6 +3,7 @@ import type * as Path from "../path.ts";
 import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions, type WebTransportProps } from "./connect.ts";
 import type { Established } from "./established.ts";
+import { isAnnounceLess } from "./quirks.ts";
 
 /** Exponential backoff settings for {@link Reload}'s reconnect loop. */
 export type ReloadDelay = {
@@ -135,7 +136,13 @@ export class Reload {
 				this.#delay = this.delay.initial;
 				this.#retryStart = undefined;
 
-				await Promise.race([effect.cancel, connection.closed]);
+				// WebTransport.closed resolves on a graceful close (server shutdown,
+				// GOAWAY, idle timeout) and only rejects on abnormal termination.
+				// Either way the connection is gone, so a resolved close must also
+				// reconnect; only effect.cancel (teardown) returns without retrying.
+				const closed = await Promise.race([effect.cancel, connection.closed.then(() => "closed" as const)]);
+				if (closed !== "closed") return;
+				throw new Error("connection closed");
 			} catch (err) {
 				console.warn("connection error:", err);
 
@@ -168,9 +175,9 @@ export class Reload {
 
 		effect.cleanup(() => this.#announced.set(new Set()));
 
-		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
-		// skip announce subscriptions entirely for those hosts.
-		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
+		// Announce-less relays do not support SUBSCRIBE_NAMESPACE, so skip
+		// announce subscriptions entirely for those hosts.
+		if (isAnnounceLess(conn.url)) {
 			return;
 		}
 
