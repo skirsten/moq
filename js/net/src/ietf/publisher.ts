@@ -24,6 +24,12 @@ import {
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 import { Version } from "./version.ts";
 
+// Delay before re-announcing after the announce stream dies unexpectedly.
+const ANNOUNCE_RETRY_MS = 1000;
+
+// An explicit rejection from the relay is authoritative; retrying would spam it.
+class AnnounceRejected extends Error {}
+
 /**
  * Handles publishing broadcasts using moq-transport protocol.
  * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
@@ -54,7 +60,8 @@ export class Publisher {
 
 	/**
 	 * Publishes a broadcast with any associated tracks.
-	 * Opens a bidi stream to send PublishNamespace and waits for response.
+	 * Announces via PublishNamespace and re-announces if the announce stream dies
+	 * while the broadcast is still open; an explicit rejection is terminal.
 	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
 		this.#broadcasts.set(path, broadcast);
@@ -64,67 +71,107 @@ export class Publisher {
 
 	async #runPublish(path: Path.Valid, broadcast: Broadcast) {
 		try {
-			const requestId = await this.#session.nextRequestId();
-			if (requestId === undefined) return;
+			for (;;) {
+				try {
+					const requestId = await this.#session.nextRequestId();
+					if (requestId === undefined) return;
 
-			const stream = await this.#session.openBi();
+					const ended = await this.#announce(path, broadcast, requestId);
+					if (ended === "broadcast") return;
 
-			try {
-				// Write PublishNamespace
-				await stream.writer.u53(PublishNamespace.id);
-				const msg = new PublishNamespace({ requestId, trackNamespace: path });
-				await msg.encode(stream.writer, this.#session.version);
-
-				// Read response (RequestOk and PublishNamespaceOk share 0x07)
-				const respTypeId = await stream.reader.u53();
-				if (respTypeId === RequestOk.id) {
-					// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
-					if (this.#session.version === Version.DRAFT_14) {
-						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
-					} else {
-						await RequestOk.decode(stream.reader, this.#session.version);
+					console.warn(`announce stream closed: broadcast=${path}, re-announcing`);
+				} catch (err: unknown) {
+					const e = error(err);
+					if (err instanceof AnnounceRejected) {
+						console.warn(`announce rejected: broadcast=${path} error=${e.message}`);
+						return;
 					}
-				} else if (respTypeId === PublishNamespaceError.id || respTypeId === RequestError.id) {
-					// draft-14 answers with PublishNamespaceError; draft-15+ with the generic RequestError.
-					const err =
-						respTypeId === PublishNamespaceError.id
-							? await PublishNamespaceError.decode(stream.reader, this.#session.version)
-							: await RequestError.decode(stream.reader, this.#session.version);
-					throw new Error(`PublishNamespace rejected: code=${err.errorCode} reason=${err.reasonPhrase}`);
-				} else {
-					throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+					console.warn(`announce failed: broadcast=${path} error=${e.message}, retrying`);
 				}
 
-				// Wait for broadcast to close or stream to close (peer cancelled)
-				await Promise.race([broadcast.closed, stream.reader.closed]);
-
-				// For v14-v16: send explicit PublishNamespaceDone (removed in v17+)
-				if (
-					this.#session.version === Version.DRAFT_14 ||
-					this.#session.version === Version.DRAFT_15 ||
-					this.#session.version === Version.DRAFT_16
-				) {
-					try {
-						await stream.writer.u53(PublishNamespaceDone.id);
-						const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
-						await done.encode(stream.writer, this.#session.version);
-					} catch {
-						// Stream might already be closed
-					}
-				}
-
-				stream.close();
-			} catch (err) {
-				stream.abort(error(err));
-				throw err;
+				const reason = await Promise.race([
+					broadcast.closed.then(() => "closed" as const),
+					this.#quic.closed.then(
+						() => "session" as const,
+						() => "session" as const,
+					),
+					new Promise<"retry">((resolve) => setTimeout(() => resolve("retry"), ANNOUNCE_RETRY_MS)),
+				]);
+				if (reason !== "retry") return;
 			}
-		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(`announce failed: broadcast=${path} error=${e.message}`);
 		} finally {
 			broadcast.close();
 			this.#broadcasts.delete(path);
 			this.#notifyConsumers(path, false);
+		}
+	}
+
+	/**
+	 * One announce attempt: sends PublishNamespace, then serves until the broadcast
+	 * closes ("broadcast") or the peer closes the announce stream ("stream").
+	 * Throws {@link AnnounceRejected} when the relay explicitly rejects the announce.
+	 */
+	async #announce(path: Path.Valid, broadcast: Broadcast, requestId: bigint): Promise<"broadcast" | "stream"> {
+		const stream = await this.#session.openBi();
+
+		try {
+			// Write PublishNamespace
+			await stream.writer.u53(PublishNamespace.id);
+			const msg = new PublishNamespace({ requestId, trackNamespace: path });
+			await msg.encode(stream.writer, this.#session.version);
+
+			// Read response (RequestOk and PublishNamespaceOk share 0x07)
+			const respTypeId = await stream.reader.u53();
+			if (respTypeId === RequestOk.id) {
+				// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
+				if (this.#session.version === Version.DRAFT_14) {
+					await PublishNamespaceOk.decode(stream.reader, this.#session.version);
+				} else {
+					await RequestOk.decode(stream.reader, this.#session.version);
+				}
+			} else if (respTypeId === PublishNamespaceError.id || respTypeId === RequestError.id) {
+				// draft-14 answers with PublishNamespaceError; draft-15+ with the generic RequestError.
+				const err =
+					respTypeId === PublishNamespaceError.id
+						? await PublishNamespaceError.decode(stream.reader, this.#session.version)
+						: await RequestError.decode(stream.reader, this.#session.version);
+				throw new AnnounceRejected(
+					`PublishNamespace rejected: code=${err.errorCode} reason=${err.reasonPhrase}`,
+				);
+			} else {
+				throw new AnnounceRejected(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+			}
+
+			// Wait for broadcast to close or stream to close (peer cancelled)
+			const ended = await Promise.race([
+				broadcast.closed.then(() => "broadcast" as const),
+				stream.reader.closed.then(
+					() => "stream" as const,
+					() => "stream" as const,
+				),
+			]);
+
+			// For v14-v16: send explicit PublishNamespaceDone (removed in v17+)
+			if (
+				ended === "broadcast" &&
+				(this.#session.version === Version.DRAFT_14 ||
+					this.#session.version === Version.DRAFT_15 ||
+					this.#session.version === Version.DRAFT_16)
+			) {
+				try {
+					await stream.writer.u53(PublishNamespaceDone.id);
+					const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
+					await done.encode(stream.writer, this.#session.version);
+				} catch {
+					// Stream might already be closed
+				}
+			}
+
+			stream.close();
+			return ended;
+		} catch (err) {
+			stream.abort(error(err));
+			throw err;
 		}
 	}
 
