@@ -5,6 +5,7 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 import { type BufferedRanges, timeRangesToArray } from "../buffered";
 import type { Muxer } from "../mse";
+import { retryTrackEnd } from "../resubscribe";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -21,6 +22,9 @@ export class Mse implements Backend {
 	readonly stats: Getter<Stats | undefined> = this.#stats;
 
 	#buffered = new Signal<BufferedRanges>([]);
+
+	// Bumped when the subscription ends mid-broadcast so #runMedia resubscribes.
+	#resubscribe = new Signal(0);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#stalled = new Signal<boolean>(false);
@@ -105,8 +109,10 @@ export class Mse implements Backend {
 	): void {
 		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
+		effect.get(this.#resubscribe);
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
+		retryTrackEnd(effect, data, this.#resubscribe);
 
 		// Decode the catalog's authoritative init segment once and read the
 		// timescale out of it. The catalog also gives us the bytes to feed
@@ -145,8 +151,10 @@ export class Mse implements Backend {
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
+		effect.get(this.#resubscribe);
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
+		retryTrackEnd(effect, data, this.#resubscribe);
 
 		const format = config.container.kind === "loc" ? new Container.Loc.Format() : new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.

@@ -6,6 +6,7 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 import type { BufferedRanges } from "../buffered";
+import { retryTrackEnd } from "../resubscribe";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -246,6 +247,9 @@ class DecoderTrack {
 	// of stalling at QUEUE_CAP.
 	#promoted = false;
 
+	// Bumped when the subscription ends mid-broadcast so #run resubscribes.
+	#resubscribe = new Signal(0);
+
 	signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -262,8 +266,11 @@ class DecoderTrack {
 	}
 
 	#run(effect: Effect): void {
+		effect.get(this.#resubscribe);
+
 		const sub = this.broadcast.subscribe(this.track, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
+		retryTrackEnd(effect, sub, this.#resubscribe);
 
 		const decoder = new VideoDecoder({
 			output: (frame: VideoFrame) => {

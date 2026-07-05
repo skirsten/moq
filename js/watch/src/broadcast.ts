@@ -5,6 +5,7 @@ import { Connection, Path } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
+import { retryTrackEnd } from "./resubscribe";
 
 /** Consumes a custom track once subscribed, scoped to the subscription's lifetime. */
 export type ConsumeTrack = (track: Moq.Track, effect: Effect) => void;
@@ -268,13 +269,17 @@ export class Broadcast {
 	 * Returns a function to stop subscribing; also stopped when this broadcast closes.
 	 */
 	subscribeTrack(name: string, priority: number, consume: ConsumeTrack): () => void {
+		const retry = new Signal(0);
 		const signals = new Effect();
 		signals.run((effect) => {
+			effect.get(retry);
+
 			const active = effect.get(this.active);
 			if (!active) return;
 
 			const track = active.subscribe(name, priority);
 			effect.cleanup(() => track.close());
+			retryTrackEnd(effect, track, retry);
 
 			consume(track, effect);
 		});

@@ -6,6 +6,7 @@ import { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 import type { BufferedRanges } from "../buffered";
+import { retryTrackEnd } from "../resubscribe";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -70,6 +71,9 @@ export class Decoder {
 	// warmup frames to settle the codec, but later decoders (re-subscribe after
 	// unmute) must not, or they punch a silent hole into the resumed stream.
 	#primed = false;
+
+	// Bumped when the subscription ends mid-broadcast so #runDecoder resubscribes.
+	#resubscribe = new Signal(0);
 
 	#signals = new Effect();
 
@@ -193,6 +197,8 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
+		effect.get(this.#resubscribe);
+
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
@@ -210,6 +216,7 @@ export class Decoder {
 
 		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
+		retryTrackEnd(effect, sub, this.#resubscribe);
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafDecoder(effect, sub, config);

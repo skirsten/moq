@@ -5,6 +5,7 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import { base64ToBytes } from "../base64";
 import { type BufferedRanges, timeRangesToArray } from "../buffered";
 import type { Muxer } from "../mse";
+import { retryTrackEnd } from "../resubscribe";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -24,6 +25,9 @@ export class Mse implements Backend {
 	readonly stats: Getter<Stats | undefined> = this.#stats;
 
 	#buffered = new Signal<BufferedRanges>([]);
+
+	// Bumped when the subscription ends mid-broadcast so #runMedia resubscribes.
+	#resubscribe = new Signal(0);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	// MSE plays through the <video> element, not WebAudio.
@@ -78,8 +82,10 @@ export class Mse implements Backend {
 			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
+		effect.get(this.#resubscribe);
 		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
+		retryTrackEnd(effect, sub, this.#resubscribe);
 
 		if (config.container.kind === "cmaf") {
 			this.#runCmafMedia(effect, sub, config, sourceBuffer, element);
