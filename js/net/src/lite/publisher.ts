@@ -4,7 +4,7 @@ import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, isCleanStop } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
@@ -268,6 +268,16 @@ export class Publisher {
 			track.close();
 			stream.close();
 		} catch (err: unknown) {
+			// A code-0 stop/cancel is the peer unsubscribing after a delivered group, not a
+			// failure. Close cleanly (no error) so the shared upstream track keeps serving
+			// other subscribers instead of tearing down for everyone.
+			if (isCleanStop(err)) {
+				console.debug(`publish close: broadcast=${broadcast} track=${track.name}`);
+				track.close();
+				stream.close();
+				return;
+			}
+
 			const e = error(err);
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${e.message}`);
 			track.close(e);
@@ -312,6 +322,14 @@ export class Publisher {
 				stream.close();
 				group.close();
 			} catch (err: unknown) {
+				// A code-0 stop is the subscriber dropping this group, not a failure; close it
+				// without an error so the group producer isn't aborted.
+				if (isCleanStop(err)) {
+					stream.close();
+					group.close();
+					return;
+				}
+
 				const e = error(err);
 				stream.reset(e);
 				group.close(e);
