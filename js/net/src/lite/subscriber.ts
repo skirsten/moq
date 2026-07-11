@@ -183,11 +183,17 @@ export class Subscriber {
 
 		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer, this.version);
+		// Opening the stream and sending the request can reject if the connection
+		// is already closing (e.g. the transport rejects createBidirectionalStream).
+		// Keep it inside the try so that error closes the track instead of floating
+		// out as an unhandled rejection; stream is undefined until open succeeds.
+		let stream: Stream | undefined;
 
 		try {
+			stream = await Stream.open(this.#quic);
+			await stream.writer.u53(StreamId.Subscribe);
+			await msg.encode(stream.writer, this.version);
+
 			// The first response MUST be a SUBSCRIBE_OK.
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
 			if (!("ok" in resp)) {
@@ -221,7 +227,7 @@ export class Subscriber {
 			console.warn(
 				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
-			stream.abort(e);
+			stream?.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
 		}
