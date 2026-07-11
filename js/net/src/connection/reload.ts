@@ -123,11 +123,18 @@ export class Reload {
 
 		effect.set(this.status, "connecting", "disconnected");
 
+		// Set once effect.cancel fires (teardown), so we can tell an intentional
+		// teardown apart from a connection that dropped on its own.
+		let cancelled = false;
+		const untilCancel = effect.cancel.then(() => {
+			cancelled = true;
+		});
+
 		effect.spawn(async () => {
 			try {
 				const pending = connect(url, { websocket: this.websocket, webtransport: this.webtransport });
 
-				const connection = await Promise.race([effect.cancel, pending]);
+				const connection = await Promise.race([untilCancel.then(() => undefined), pending]);
 				if (!connection) {
 					pending.then((conn) => conn.close()).catch(() => {});
 					return;
@@ -142,29 +149,40 @@ export class Reload {
 				this.#delay = this.delay.initial;
 				this.#retryStart = undefined;
 
-				await Promise.race([effect.cancel, connection.closed]);
+				// The transport's `closed` promise resolves (not rejects) on an abnormal
+				// close over the WebSocket fallback, so a dropped connection lands here
+				// rather than in catch. Treat any non-teardown wake as a disconnect and
+				// reconnect; only an effect teardown should stop the loop.
+				await Promise.race([untilCancel, connection.closed]);
+				if (cancelled) return;
+				this.#scheduleReconnect(effect);
 			} catch (err) {
 				console.warn("connection error:", err);
-
-				// Track retry start for timeout.
-				this.#retryStart ??= performance.now();
-
-				const timeout = this.delay.timeout ?? 300000;
-				if (timeout > 0) {
-					const elapsed = performance.now() - this.#retryStart;
-					if (elapsed >= timeout) {
-						console.warn("reconnect timed out");
-						this.#closedReject(err instanceof Error ? err : new Error(String(err)));
-						return;
-					}
-				}
-
-				const tick = this.#tick.peek() + 1;
-				effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
-
-				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+				this.#scheduleReconnect(effect, err);
 			}
 		});
+	}
+
+	/** Schedule the next reconnect attempt with exponential backoff, or give up if
+	 *  the retry timeout has elapsed (rejecting {@link Reload.closed}). */
+	#scheduleReconnect(effect: Effect, err?: unknown): void {
+		// Track retry start for timeout.
+		this.#retryStart ??= performance.now();
+
+		const timeout = this.delay.timeout ?? 300000;
+		if (timeout > 0) {
+			const elapsed = performance.now() - this.#retryStart;
+			if (elapsed >= timeout) {
+				console.warn("reconnect timed out");
+				this.#closedReject(err instanceof Error ? err : new Error(String(err ?? "connection closed")));
+				return;
+			}
+		}
+
+		const tick = this.#tick.peek() + 1;
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
+
+		this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
 	}
 
 	#runAnnounced(effect: Effect): void {
