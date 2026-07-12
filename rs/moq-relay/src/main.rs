@@ -60,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
 	let stats = config.stats.build(cluster.origin.clone());
 	let cluster = cluster.with_stats(stats);
 
+	// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
+	// /metrics + /health, separate from the customer-facing web server. No-op
+	// when unconfigured.
+	let internal = Internal::new(config.internal, cluster.stats.clone());
+
 	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(
 		WebState {
@@ -88,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
+		Err(err) = internal.run() => return Err(err).context("internal server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
 		else => Ok(()),
