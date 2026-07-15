@@ -108,6 +108,13 @@ impl<E: CatalogExt> Import<E> {
 		Ok(())
 	}
 
+	/// Cut the current group at `end` without finishing the track; publishing resumes on
+	/// the next keyframe. See `import::Track::cut` for the full contract.
+	pub fn cut(&mut self, end: Option<crate::container::Timestamp>) -> crate::Result<()> {
+		self.track.cut(end)?;
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;

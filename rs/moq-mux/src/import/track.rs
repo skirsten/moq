@@ -16,6 +16,9 @@ use crate::container::{Frame, Timestamp};
 trait Importer: Send {
 	fn decode(&mut self, frame: &[u8], pts: Option<Timestamp>) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
+	/// Close the current group without finishing the track
+	/// (see `Track::cut`).
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -25,6 +28,9 @@ trait StreamImporter: Send {
 	fn initialize(&mut self, data: &[u8]) -> Result<()>;
 	fn decode(&mut self, data: &[u8]) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
+	/// Close the current group without finishing the track
+	/// (see `Track::cut`).
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -41,6 +47,9 @@ trait FrameSink: Send {
 	fn initialize(&mut self, init: &[u8]) -> Result<()>;
 	fn decode(&mut self, frames: Vec<Frame>) -> Result<()>;
 	fn finish(&mut self) -> Result<()>;
+	/// Close the current group without finishing the track
+	/// (see `Track::cut`).
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()>;
 	fn seek(&mut self, sequence: u64) -> Result<()>;
 	fn demand(&self) -> moq_net::TrackDemand;
 }
@@ -76,6 +85,9 @@ macro_rules! impl_frame_sink {
 			fn finish(&mut self) -> Result<()> {
 				<$ty>::finish(self)
 			}
+			fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+				<$ty>::cut(self, end)
+			}
 			fn seek(&mut self, sequence: u64) -> Result<()> {
 				<$ty>::seek(self, sequence)
 			}
@@ -104,6 +116,9 @@ impl<S: Splitter, I: FrameSink> Importer for SplitWhole<S, I> {
 	}
 	fn finish(&mut self) -> Result<()> {
 		self.import.finish()
+	}
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		self.import.cut(end)
 	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.split.reset();
@@ -143,6 +158,9 @@ impl<S: Splitter, I: FrameSink> StreamImporter for SplitStream<S, I> {
 		self.import.decode(tail)?;
 		self.import.finish()
 	}
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		self.import.cut(end)
+	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.split.reset();
 		self.import.seek(sequence)
@@ -168,6 +186,9 @@ impl<E: CatalogExt> Importer for Avc1<E> {
 	fn finish(&mut self) -> Result<()> {
 		self.import.finish()
 	}
+	fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		self.import.cut(end)
+	}
 	fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.import.seek(sequence)
 	}
@@ -186,6 +207,9 @@ macro_rules! impl_importer_direct {
 			}
 			fn finish(&mut self) -> Result<()> {
 				<$ty>::finish(self)
+			}
+			fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+				<$ty>::cut(self, end)
 			}
 			fn seek(&mut self, sequence: u64) -> Result<()> {
 				<$ty>::seek(self, sequence)
@@ -361,6 +385,34 @@ impl<E: CatalogExt> Track<E> {
 		self.inner.finish()
 	}
 
+	/// Cut the current group, leaving the track (and its catalog rendition) OPEN. That's
+	/// unlike [`finish`](Self::finish), which ends the track. Publishing resumes into a
+	/// fresh group on the next keyframe.
+	///
+	/// `end` is where this group's content stops, i.e. the presentation end of its last
+	/// frame, NOT the timestamp of whatever resumes later. It bounds that last frame,
+	/// which otherwise has no end of its own: a consumer would have to wait for the
+	/// *next* group's first frame to infer one, and that group may be late, reordered,
+	/// or never arrive at all. So a group cut at a known `end` is self-describing.
+	///
+	/// `None` is for callers with no boundary to give, i.e. audio, where every frame is
+	/// a keyframe and the duration is deterministic, so the next packet bounds this one
+	/// anyway.
+	///
+	/// Typical use: pause a track that has lost its last subscriber while leaving a
+	/// COMPLETE final group rather than a truncated one.
+	///
+	/// Invariants: call it while a group is open; the next group then begins on the
+	/// following keyframe (mirroring the container producer's `cut`, whose next write
+	/// must be a keyframe). A keyframe arriving through `decode` cuts the previous
+	/// group on its own, using its own timestamp, so call this only when you know the
+	/// content ends somewhere that keyframe won't tell us. Composes with
+	/// [`finish`](Self::finish) and [`seek`](Self::seek). This is the canonical
+	/// description that the codec `Import`s and `TrackStream` reference.
+	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		self.inner.cut(end)
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.inner.seek(sequence)
@@ -468,6 +520,12 @@ impl<E: CatalogExt> TrackStream<E> {
 	/// Finish the importer, flushing any buffered data.
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.finish()
+	}
+
+	/// Close the current group cleanly without finishing the track
+	/// (see [`Track::cut`]).
+	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<()> {
+		self.inner.cut(end)
 	}
 
 	/// Close the current group and open the next one at `sequence`.
@@ -630,6 +688,37 @@ mod tests {
 		assert_eq!(video.coded_width, Some(1280));
 		assert_eq!(video.coded_height, Some(720));
 		assert!(!snapshot.video.renditions.contains_key("0.avc3"));
+	}
+
+	/// `Track::cut` closes the current group cleanly and leaves the track OPEN. The next
+	/// decoded frame opens a fresh group and `finish` still works. Uses opus (every audio frame is a
+	/// keyframe, so each `decode` after a close opens a group).
+	#[tokio::test(start_paused = true)]
+	async fn cut_closes_group_and_keeps_track_open() {
+		let (mut broadcast, catalog) = new_broadcast();
+		let request = broadcast.create_track(moq_net::Track::new("audio")).unwrap();
+		let consumer = request.consume();
+		let mut import = Track::new(request, catalog, "opus", &opus_head()).unwrap();
+
+		// Group 1: one frame, then cut the group at its end (the pause edge).
+		import
+			.decode(b"frame-one", Some(Timestamp::from_micros(1_000).unwrap()))
+			.unwrap();
+		import.cut(Some(Timestamp::from_micros(1_500).unwrap())).unwrap();
+
+		// Track is still open: a later frame opens a fresh group 2 (resume after pause).
+		import
+			.decode(b"frame-two", Some(Timestamp::from_micros(2_000).unwrap()))
+			.unwrap();
+		import.finish().unwrap();
+
+		// Two complete groups reached the consumer, no truncated/never-finished group.
+		let mut groups = 0usize;
+		let mut consumer = consumer;
+		while let Some(_group) = consumer.recv_group().await.unwrap() {
+			groups += 1;
+		}
+		assert_eq!(groups, 2, "cut closed group 1; the next frame opened group 2");
 	}
 
 	/// A changed key frame just updates the rendition in place; there are no fixed

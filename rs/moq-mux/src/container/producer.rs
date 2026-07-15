@@ -9,13 +9,14 @@ use super::{Container, Frame, Timestamp};
 /// ## Group Management
 ///
 /// Every group must start with a keyframe. Writing a frame with `keyframe = true`
-/// closes the previous group (if any) and starts a new one. Writing a non-keyframe
+/// cuts the previous group (if any) and starts a new one. Writing a non-keyframe
 /// frame when no group is open is a protocol violation.
 ///
-/// [`finish_group`](Self::finish_group) closes the current group early; the next write
-/// must be a keyframe. This is useful for streams without inherent keyframes
-/// (e.g. audio) that mark every Nth frame as a keyframe but want to flush the
-/// current group immediately rather than waiting for the next keyframe to arrive.
+/// [`cut`](Self::cut) closes the current group, ideally saying where its content ends;
+/// the next write must be a keyframe. Reach for it when the following keyframe won't
+/// supply that boundary in time: before a pause (where the next group may be late, or
+/// never come), or for a stream without inherent keyframes (e.g. audio) that marks
+/// every Nth frame as one but wants to close the current group now rather than wait.
 ///
 /// ## Latency Buffering
 ///
@@ -95,10 +96,10 @@ impl<C: Container> Producer<C> {
 	/// the current group; if no group is open it returns [`MissingKeyframe`](super::MissingKeyframe),
 	/// so a caller joining mid-stream can skip frames until the first keyframe.
 	pub fn write(&mut self, frame: Frame) -> Result<(), C::Error> {
-		// Close the current group on an explicit keyframe, passing its timestamp so
-		// the previous group's last frame can borrow it as a duration boundary.
+		// A keyframe cuts the previous group, its own timestamp being the boundary the
+		// group's last frame ends at.
 		if frame.keyframe {
-			self.finish_group_at(Some(frame.timestamp))?;
+			self.cut(Some(frame.timestamp))?;
 		}
 
 		// Start a new group if needed; the first frame of a group must be a keyframe.
@@ -153,22 +154,33 @@ impl<C: Container> Producer<C> {
 		Ok(())
 	}
 
-	/// Close the current group early, flushing any buffered frames.
+	/// Cut the current group: write out any buffered frames and close it. The next
+	/// [`write`](Self::write) must be a keyframe.
 	///
-	/// The next [`write`](Self::write) must be a keyframe.
-	pub fn finish_group(&mut self) -> Result<(), C::Error> {
-		self.finish_group_at(None)
-	}
-
-	/// Like [`finish_group`](Self::finish_group), but uses `next` (the timestamp of the
-	/// keyframe that rolled the group over) as the duration boundary for the group's
-	/// last frame. See [`flush`](Self::flush).
-	fn finish_group_at(&mut self, next: Option<Timestamp>) -> Result<(), C::Error> {
-		self.flush(next)?;
+	/// `end` is where the group's content stops, which is the one thing the group can't
+	/// say for itself: Legacy/LOC carry no per-frame duration, so a consumer bounds the
+	/// last frame by the *next* group's first frame -- and that group may be late,
+	/// reordered, or never arrive. Pass it whenever you know it.
+	///
+	/// `None` means "no boundary to give", for callers that genuinely don't have one:
+	/// the one-frame-per-group sources (audio packets, TS sections) that close a group
+	/// the moment they write it, where the next packet supplies the bound anyway.
+	///
+	/// A keyframe arriving through [`write`](Self::write) cuts the previous group on its
+	/// own, passing its own timestamp -- so an explicit `cut` is only needed when the
+	/// content ends somewhere that keyframe won't tell us: before a pause, or any gap.
+	pub fn cut(&mut self, end: Option<Timestamp>) -> Result<(), C::Error> {
+		self.flush(end)?;
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
 		Ok(())
+	}
+
+	#[doc(hidden)]
+	#[deprecated(note = "use `cut`")]
+	pub fn finish_group(&mut self) -> Result<(), C::Error> {
+		self.cut(None)
 	}
 
 	/// Close the current group (if any) and open the next group at the given sequence.
@@ -176,7 +188,7 @@ impl<C: Container> Producer<C> {
 	/// The next [`write`](Self::write) must be a keyframe and will land in a group with
 	/// `sequence`. Useful for joining mid-stream or signalling a discontinuity.
 	pub fn seek(&mut self, sequence: u64) -> Result<(), C::Error> {
-		self.finish_group()?;
+		self.cut(None)?;
 		self.pending_sequence = Some(sequence);
 		Ok(())
 	}
@@ -221,8 +233,12 @@ impl<C: Container> Producer<C> {
 	}
 
 	/// Finish the track, flushing any buffered frames and closing any open group.
+	///
+	/// The final group's last frame has no boundary to end at -- there's no following
+	/// keyframe, and end-of-track says nothing about how long that frame lasts -- so a
+	/// publisher that knows should [`cut`](Self::cut) first.
 	pub fn finish(&mut self) -> Result<(), C::Error> {
-		self.finish_group()?;
+		self.cut(None)?;
 		self.inner.finish()?;
 		Ok(())
 	}
@@ -296,9 +312,27 @@ mod tests {
 		assert_eq!(collect_groups(consumer).await, vec![2, 2]);
 	}
 
-	/// `finish_group()` flushes the current group immediately; the next write must be a keyframe.
+	/// `cut()` closes the current group immediately; the next write must be a keyframe.
 	#[tokio::test]
-	async fn finish_group_closes_immediately() {
+	async fn cut_closes_immediately() {
+		let track = track_producer("test");
+		let consumer = track.consume();
+		let mut producer = Producer::new(track, Container::Legacy);
+
+		producer.write(frame(0, true)).unwrap();
+		producer.write(frame(10_000, false)).unwrap();
+		producer.cut(Some(Timestamp::from_micros(15_000).unwrap())).unwrap();
+		producer.write(frame(20_000, true)).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(collect_groups(consumer).await, vec![2, 1]);
+	}
+
+	/// The deprecated `finish_group()` still delegates to the same close, so callers
+	/// that haven't moved to `cut` keep working until it's removed.
+	#[tokio::test]
+	#[allow(deprecated)]
+	async fn deprecated_finish_group_still_closes() {
 		let track = track_producer("test");
 		let consumer = track.consume();
 		let mut producer = Producer::new(track, Container::Legacy);
