@@ -271,12 +271,20 @@ pub(crate) async fn connect(
 
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-	let alpn = moq_net::ALPNS[0].as_bytes();
-	let mut additional: Vec<Vec<u8>> = moq_net::ALPNS[1..]
-		.iter()
-		.map(|alpn| alpn.as_bytes().to_vec())
-		.collect();
-	additional.push(b"h3".to_vec());
+	// A raw moq session carries no request URL, and servers do not consume the SETUP
+	// path for pre-accept auth, so a URL with a meaningful path must ride
+	// H3/WebTransport, which conveys it in the CONNECT request.
+	let pathed = !matches!(url.path(), "" | "/");
+	let (alpn, additional): (&[u8], Vec<Vec<u8>>) = if pathed {
+		(web_transport_iroh::ALPN_H3.as_bytes(), Vec::new())
+	} else {
+		let mut additional: Vec<Vec<u8>> = moq_net::ALPNS[1..]
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
+		additional.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
+		(moq_net::ALPNS[0].as_bytes(), additional)
+	};
 	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
 	let mut connecting = endpoint.connect_with_opts(endpoint_addr, alpn, opts).await?;
