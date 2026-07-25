@@ -129,16 +129,73 @@ impl Connection {
 		// connect time, so hold the session open no longer than the credential is
 		// valid. Without an expiry, just wait for the session to close.
 		let Some(expires) = token.expires else {
-			return Err(session.closed().await.into());
+			return Err(Self::serve_logging_stats(&session).await.into());
 		};
 
 		let remaining = expires.duration_since(std::time::SystemTime::now()).unwrap_or_default();
-		match tokio::time::timeout(remaining, session.closed()).await {
+		match tokio::time::timeout(remaining, Self::serve_logging_stats(&session)).await {
 			Ok(err) => Err(err.into()),
 			Err(_) => {
 				tracing::info!("credential expired, closing session");
 				session.abort(moq_net::Error::Unauthorized);
 				Ok(())
+			}
+		}
+	}
+
+	/// Wait for the session to close, periodically logging transport stats.
+	///
+	/// Emits one line per interval with per-interval deltas (idle intervals are
+	/// skipped) and a cumulative summary when the session ends, so path trouble
+	/// toward a specific client (loss bursts, RTT spikes, pacing collapses) can
+	/// be read straight from the relay logs.
+	async fn serve_logging_stats(session: &moq_net::Session) -> moq_net::Error {
+		const INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+		let started = std::time::Instant::now();
+		let mut prev = session.stats();
+		if prev.packets_sent.is_none() {
+			// Backend without stats support (e.g. the WebSocket fallback).
+			return session.closed().await;
+		}
+
+		let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
+		ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+		loop {
+			tokio::select! {
+				err = session.closed() => {
+					let cur = session.stats();
+					tracing::info!(
+						elapsed_s = started.elapsed().as_secs(),
+						tx_bytes = cur.bytes_sent.unwrap_or(0),
+						rx_bytes = cur.bytes_received.unwrap_or(0),
+						lost_packets = cur.packets_lost.unwrap_or(0),
+						lost_bytes = cur.bytes_lost.unwrap_or(0),
+						"transport stats total",
+					);
+					return err;
+				}
+				_ = ticker.tick() => {
+					let cur = session.stats();
+					let delta = |c: Option<u64>, p: Option<u64>| c.unwrap_or(0).saturating_sub(p.unwrap_or(0));
+					let tx = delta(cur.bytes_sent, prev.bytes_sent);
+					let rx = delta(cur.bytes_received, prev.bytes_received);
+					let lost = delta(cur.packets_lost, prev.packets_lost);
+					if tx > 0 || rx > 0 || lost > 0 {
+						tracing::info!(
+							tx_bytes = tx,
+							rx_bytes = rx,
+							lost_packets = lost,
+							lost_bytes = delta(cur.bytes_lost, prev.bytes_lost),
+							total_lost_packets = cur.packets_lost.unwrap_or(0),
+							rtt_ms = cur.rtt.map(|rtt| rtt.as_millis() as u64).unwrap_or(0),
+							send_rate_kbps = cur.estimated_send_rate.map(|r| r / 1000).unwrap_or(0),
+							"transport stats",
+						);
+					}
+					prev = cur;
+				}
 			}
 		}
 	}
