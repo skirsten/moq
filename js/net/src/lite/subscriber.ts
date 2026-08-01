@@ -755,8 +755,15 @@ export class Subscriber {
 			// Scale 0 (pre-lite-05) carries no timestamp, so we wall-clock-stamp.
 			let prevTs = 0n;
 
+			// Terminal conditions settle at most once; watch them across frames as stable promises.
+			// Racing the Onces directly would add a permanent subscriber to the track's closed
+			// signal on every frame, retained until the subscription ends.
+			const closed = Promise.race([
+				Promise.resolve<Error | null>(track.closed),
+				Promise.resolve<Error | null>(producer.closed),
+			]);
 			for (;;) {
-				const done = await Promise.race([stream.done(), track.closed, producer.closed]);
+				const done = await Promise.race([stream.done(), closed]);
 				if (done !== false) break;
 
 				let timestamp: Time.Timestamp;

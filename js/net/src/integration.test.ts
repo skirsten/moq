@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import type { Getter } from "@moq/signals";
+import { expect, spyOn, test } from "bun:test";
+import { type Getter, Once } from "@moq/signals";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import { RemoteError } from "./error.ts";
@@ -1210,6 +1210,47 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	watched.close();
 	producer.close();
 	await serving;
+	client.close();
+	server.close();
+});
+
+test("integration: lite draft-05 group read loop does not subscribe per frame", async () => {
+	const enc = new TextEncoder();
+	const pair = createMockTransportPair(Lite.ALPN_05);
+
+	const [client, server] = await Promise.all([connect(url, { transport: pair.client }), accept(pair.server, url)]);
+
+	const broadcast = new BroadcastProducer();
+	server.publish(Path.from("test"), broadcast);
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const remote = client.consume(Path.from("test"));
+	const track = remote.track("video").subscribe();
+
+	// One frame through first, so subscription setup is complete before measuring.
+	const group = producer.appendGroup();
+	group.writeFrame({ payload: enc.encode("f0"), timestamp: Timestamp.fromMillis(0) });
+	const consumer = await track.recvGroup();
+	if (!consumer) throw new Error("expected group");
+	await consumer.readFrame();
+
+	// The read loop must watch its terminal signals (track/producer closed) as
+	// stable promises. Subscribing per frame retains every registration on the
+	// still-pending track close signal for the life of the subscription.
+	const then = spyOn(Once.prototype, "then");
+	const frames = 100;
+	for (let i = 1; i <= frames; i++) {
+		group.writeFrame({ payload: enc.encode(`f${i}`), timestamp: Timestamp.fromMillis(i) });
+	}
+	for (let i = 1; i <= frames; i++) {
+		const frame = await consumer.readFrame();
+		if (!frame) throw new Error(`expected frame ${i}`);
+	}
+	expect(then.mock.calls.length).toBeLessThan(frames / 2);
+	then.mockRestore();
+
+	broadcast.close();
+	remote.close();
 	client.close();
 	server.close();
 });
