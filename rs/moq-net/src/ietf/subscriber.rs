@@ -8,7 +8,7 @@ use crate::{
 	Error, Path, PathOwned, Timescale, broadcast,
 	coding::{Reader, Stream},
 	frame, group,
-	ietf::{self, Control, FilterType, GroupOrder, RequestId},
+	ietf::{self, Control, GroupOrder, RequestId},
 	origin, track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
@@ -1187,7 +1187,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				track_name: track.name().into(),
 				subscriber_priority: super::priority::to_wire(track.subscription().map(|s| s.priority).unwrap_or(0)),
 				group_order: GroupOrder::Descending,
-				filter_type: FilterType::LargestObject,
+				// Unfiltered: a LargestObject filter starts delivery at largest+1, so a
+				// strict publisher never replays a track whose current group is already
+				// published (e.g. a catalog written once at startup).
+				filter_type: None,
 			})
 			.await?;
 		Ok(())

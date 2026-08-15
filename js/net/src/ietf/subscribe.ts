@@ -50,12 +50,14 @@ export class Subscribe {
 			await w.u53(0x2); // filter type = LargestObject
 			await w.u53(0); // no parameters
 		} else {
-			// v15+: fields moved into parameters
+			// v15+: fields moved into parameters. SUBSCRIPTION_FILTER is omitted on
+			// purpose (unfiltered): a LargestObject filter starts delivery at largest+1,
+			// so a strict publisher never replays a track whose current group is already
+			// published (e.g. a catalog written once at startup).
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = true;
-			params.subscriptionFilter = 0x2; // LargestObject
 			await params.encode(w, version);
 		}
 	}
@@ -117,8 +119,9 @@ export class Subscribe {
 			throw new Error(`unsupported forward value: ${forward}`);
 		}
 
-		const filterType = params.subscriptionFilter ?? 0x2;
-		if (filterType !== 0x1 && filterType !== 0x2) {
+		// Absent means unfiltered; both supported filters are served the same way.
+		const filterType = params.subscriptionFilter;
+		if (filterType !== undefined && filterType !== 0x1 && filterType !== 0x2) {
 			throw new Error(`unsupported filter type: ${filterType}`);
 		}
 

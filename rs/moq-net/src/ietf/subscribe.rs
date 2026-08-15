@@ -47,7 +47,9 @@ pub struct Subscribe<'a> {
 	pub track_name: Cow<'a, str>,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
-	pub filter_type: FilterType,
+	/// `None` subscribes unfiltered (the SUBSCRIPTION_FILTER parameter is omitted, v15+).
+	/// Draft-14 has no unfiltered encoding, so `None` is sent as LargestObject there.
+	pub filter_type: Option<FilterType>,
 }
 
 impl Message for Subscribe<'_> {
@@ -91,7 +93,7 @@ impl Message for Subscribe<'_> {
 					track_name,
 					subscriber_priority,
 					group_order,
-					filter_type,
+					filter_type: Some(filter_type),
 				})
 			}
 			_ => {
@@ -121,7 +123,6 @@ impl Message for Subscribe<'_> {
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
-				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {
 					request_id,
@@ -150,11 +151,14 @@ impl Message for Subscribe<'_> {
 				true.encode(w, version)?; // forward
 
 				debug_assert!(
-					!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
+					!matches!(
+						self.filter_type,
+						Some(FilterType::AbsoluteStart | FilterType::AbsoluteRange)
+					),
 					"Absolute subscribe not supported"
 				);
 
-				self.filter_type.encode(w, version)?;
+				self.filter_type.unwrap_or_default().encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
 			_ => {
@@ -488,7 +492,7 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter_type: Some(FilterType::LargestObject),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -508,7 +512,7 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter_type: Some(FilterType::LargestObject),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -518,6 +522,24 @@ mod tests {
 		assert_eq!(decoded.track_namespace.as_str(), "test");
 		assert_eq!(decoded.track_name, "video");
 		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.filter_type, Some(FilterType::LargestObject));
+	}
+
+	#[test]
+	fn test_subscribe_unfiltered_round_trip_v16() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: None,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.filter_type, None);
 	}
 
 	/// Build a SUBSCRIBE body carrying a single RENDEZVOUS_TIMEOUT parameter.
@@ -623,7 +645,7 @@ mod tests {
 			track_name: "audio".into(),
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter_type: Some(FilterType::LargestObject),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -785,7 +807,7 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter_type: Some(FilterType::LargestObject),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -840,7 +862,7 @@ mod tests {
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
-			filter_type: FilterType::LargestObject,
+			filter_type: Some(FilterType::LargestObject),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);

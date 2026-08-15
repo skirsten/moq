@@ -499,13 +499,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	/// Handle a SUBSCRIBE on its bidi stream.
 	async fn run_subscribe_stream(self, mut stream: Stream<S, Version>, msg: ietf::Subscribe<'_>) -> Result<(), Error> {
 		match msg.filter_type {
-			FilterType::AbsoluteStart | FilterType::AbsoluteRange => {
+			Some(FilterType::AbsoluteStart | FilterType::AbsoluteRange) => {
 				tracing::warn!(?msg, "absolute subscribe not supported, ignoring");
 			}
-			FilterType::NextGroup => {
+			Some(FilterType::NextGroup) => {
 				tracing::warn!(?msg, "next group subscribe not supported, ignoring");
 			}
-			FilterType::LargestObject => {}
+			Some(FilterType::LargestObject) | None => {}
 		};
 
 		let request_id = msg.request_id;

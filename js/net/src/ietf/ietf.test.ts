@@ -4,9 +4,10 @@ import { Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Frame, Group, type GroupFlags } from "./object.ts";
-import { SetupOptions } from "./parameters.ts";
+import { Parameters, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -134,6 +135,31 @@ test("Subscribe v15: round trip", async () => {
 	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
 	expect(decoded.trackName).toBe("video");
 	expect(decoded.subscriberPriority).toBe(128);
+});
+
+test("Subscribe v16: omits SUBSCRIPTION_FILTER (unfiltered)", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_16);
+	const params = await decodeVersioned(
+		encoded,
+		(r, v) =>
+			Message.decode(r, async (mr) => {
+				await mr.u62(); // request id
+				await Namespace.decode(mr);
+				await mr.string(); // track name
+				return Parameters.decode(mr, v);
+			}),
+		Version.DRAFT_16,
+	);
+
+	expect(params.subscriptionFilter).toBeUndefined();
+	expect(params.subscriberPriority).toBe(128);
 });
 
 test("SubscribeOk v15: round trip", async () => {
